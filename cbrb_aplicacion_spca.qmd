@@ -21,7 +21,7 @@ execute:
 ---
 Este cuaderno presenta, en dos secciones, una revisión sobre el método sPCA, su funcionamineto teórico, y una sección aplicada que lo implementa sobre los datos obtenidos en los muestreos hidrogeoquímicos adquiridos para el proyecto Cuenca Baja Rio Bogotá, en adelante **CBRB**.
 
-LA primera parte presenta una traducción extraida del ejemplo de apliación par ala librería `adegenent`, mientras que la sección siguiente busca ofrecer los resultdos de la aplicación del método considerando dos escenario, uno en el que la red de conexión espacial se establece por defecto, y otro en donde se modifica manualmente para integrar las fallas geológicas como líite entre las muestras. De igual forma de incluyen los resulados obtenidos con el ACP clásico para facilitar la comparación del método y su interpelación aplicada. 
+La primera parte presenta una traducción extraida del ejemplo de apliación par ala librería `adegenet`, mientras que la sección siguiente busca ofrecer los resultdos de la aplicación del método considerando dos escenario, uno en el que la red de conexión espacial se establece por defecto, y otro en donde se modifica manualmente para integrar las fallas geológicas como líite entre las muestras. De igual forma de incluyen los resulados obtenidos con el ACP clásico para facilitar la comparación del método y su interpelación aplicada. 
 
 # Qué es el sPCA y por qué usarlo
 
