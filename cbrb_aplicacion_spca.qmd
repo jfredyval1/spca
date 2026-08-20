@@ -1,0 +1,1316 @@
+---
+title: "Análisis de Componentes Principales espacial (sPCA)"
+subtitle: "Tutorial comentado en español, basado en Jombart (2008) y la viñeta de *adegenet* 2.1.6"
+author: "Adaptación al español del tutorial de Thibaut Jombart"
+date: today
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    fig-width: 7
+    fig-height: 6
+    fig-align: center
+    embed-resources: true
+    code-overflow: wrap
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+Este cuaderno presenta, en dos secciones, una revisión sobre el método sPCA, su funcionamineto teórico, y una sección aplicada que lo implementa sobre los datos obtenidos en los muestreos hidrogeoquímicos adquiridos para el proyecto Cuenca Baja Rio Bogotá, en adelante **CBRB**.
+
+LA primera parte presenta una traducción extraida del ejemplo de apliación par ala librería `adegenent`, mientras que la sección siguiente busca ofrecer los resultdos de la aplicación del método considerando dos escenario, uno en el que la red de conexión espacial se establece por defecto, y otro en donde se modifica manualmente para integrar las fallas geológicas como líite entre las muestras. De igual forma de incluyen los resulados obtenidos con el ACP clásico para facilitar la comparación del método y su interpelación aplicada. 
+
+# Qué es el sPCA y por qué usarlo
+
+El **análisis de componentes principales espacial** (sPCA, *spatial Principal
+Component Analysis*) es un método multivariado diseñado para encontrar
+**patrones espaciales** en datos multivariados —en su origen, datos genéticos—
+cuando el ACP clásico no los detecta.
+
+La idea de fondo es simple: un ACP ordinario busca combinaciones lineales de las
+variables que maximizan la **varianza**, sin saber nada del espacio. Si la
+estructura dominante de los datos son unos pocos individuos atípicos, el ACP se
+quedará con ellos y el patrón geográfico —que puede ser real pero de baja
+varianza— quedará escondido en ejes posteriores. El sPCA corrige esto
+introduciendo explícitamente la información espacial en el criterio a optimizar.
+
+### Los dos ingredientes: matriz de datos y matriz de pesos espaciales
+
+- **X**: matriz de datos. En hidrogeoquímica, los elementos observados como
+  concentraciones absolutas en una muestra, con posiciones geográficas
+  absolutas y códigos únicos de identificación en filas.
+- **L**: matriz de pesos espaciales, con términos positivos que miden la
+  proximidad espacial entre entidades. Se deriva de una **red de conexión**
+  (*connection network*), se estandariza por filas (cada fila suma 1) y su
+  diagonal es cero.
+
+### El índice de Moran
+
+Para una variable centrada $\mathbf{x}$ con $n$ observaciones, la
+autocorrelación espacial puede ser medida con el índice de Moran:
+
+$$ I(\mathbf{x}) = \frac{\mathbf{x}^{T}\mathbf{L}\mathbf{x}}{\mathbf{x}^{T}\mathbf{x}} $$
+
+Interpretación:
+
+- $I$ **muy positivo**: sitios vecinos tienden a parecerse → autocorrelación
+  espacial positiva → **estructuras globales** (cambios direccionales graduales, parches grandes,
+  diferenciación entre regiones).
+- $I$ **muy negativo**: sitios vecinos tienden a diferenciarse → autocorrelación
+  espacial negativa → **estructuras locales** (patrón en damero, vecinos
+  genéticamente contrastados; típico de sistemas con evitación de la
+  endogamia).
+
+### El criterio del sPCA
+
+El problema del índice de Moran es que está estandarizado por la varianza: mide
+estructura espacial, pero **no** variabilidad. El sPCA optimiza en cambio:
+
+$$ C(\mathbf{x}) = \mathrm{var}(\mathbf{x})\,I(\mathbf{x}) = \frac{1}{n}\mathbf{x}^{T}\mathbf{L}\mathbf{x} $$
+
+Este criterio es **compuesto**: es un producto de varianza y autocorrelación.
+
+- $C$ **muy positivo** ⇒ mucha varianza *y* estructura global.
+- $C$ **muy negativo** ⇒ mucha varianza *y* estructura local.
+
+El sPCA busca las combinaciones lineales $\mathbf{X}\mathbf{v}$ que descomponen
+$C$ desde su máximo hasta su mínimo. Los autovalores resultantes son por tanto
+**positivos y negativos**: los positivos (a la izquierda del gráfico) indican
+estructuras globales, los negativos (a la derecha) estructuras locales.
+
+::: {.callout-important}
+## La regla de oro de la interpretación
+
+Como $C$ es un **producto**, un autovalor grande puede deberse a mucha varianza
+con poca estructura espacial, o al revés. Por eso **siempre** hay que
+descomponer cada autovalor en sus dos componentes (varianza e $I$ de Moran) y
+compararlos con su rango de variación posible. Una estructura con
+autocorrelación baja difícilmente es un patrón espacial; una estructura con
+varianza baja difícilmente refleja señal real en los datos. La función
+`screeplot()` hace exactamente esta descomposición.
+:::
+
+# Aplicación de PCA's sobre datos hidrogeoquímicos de CBRB
+
+El método usa la función `spca` de la librería `adegenet`; su parámetro de entrada natural es un objeto `genind`, del que se obtienen las dos piezas que el método requiere: la matriz multivariada y la ubicación espacial de cada observación.
+
+Para este caso, el objeto debe ser creado para emular la estructura esperada por la función, entregando las piezas por separado. La equivalencia es directa:
+
+| En el ejemplo genético | Aquí | Qué es |
+|---|---|---|
+| `obj@tab` — frecuencias alélicas | **`X`**: matriz `n × p` de variables fisicoquímicas | la matriz de datos |
+| `other(obj)$xy` | **`xy`**: matriz `n × 2` de coordenadas proyectadas | ubicación de cada punto |
+| `rupica.graph` (`chooseCN`) | **`cn`**: `listw` construido con `chooseCN` | la red de conexión → matriz **L** |
+| entidad = genotipo | entidad = **punto de muestreo** (`cod_sgc`) | las filas |
+| variable = alelo | variable = **ion, metal, pH, T** | las columnas |
+
+`spca` es genérica y tiene métodos `spca.matrix` y `spca.data.frame` además de
+`spca.genind`, así que una matriz numérica corriente sirve como entrada:
+
+```{r}
+#| label: hq-metodos
+#| eval: false
+library(adegenet)
+methods("spca")
+args(adegenet:::spca.matrix)
+```
+
+::: {.callout-important}
+## Las tres reglas que no se pueden romper
+
+1. **La matriz multivariada `X` debe ser numérica y sin `NA`.** Fuera `cod_sgc`, `Tipo de punto`, son variables externas a lo esperado por el modelo.
+2. **`X` y `xy` deben tener las mismas filas, en el mismo orden.** Por eso el
+   filtro de puntos sin geometría se hace **antes** de separar las dos piezas, y sobre un único `data.frame`.
+3. **Las coordenadas deben estar proyectadas (en metros o km), no en grados.**
+   La red de conexión se define por distancias euclidianas; con grados
+   decimales, un grado de longitud y uno de latitud no miden lo mismo y la red
+   sale deformada.
+:::
+
+## Paso 1 — Traer los datos y las coordenadas
+
+Los datos necesarios se encuentra almacenados en BDH, aunque es posible consumirlos mediante conexión directa, en esta entrega inicial usa los datos *.rds* mientras se replica con exactitud las modificaciones a valores puntuales dentro de BDH.
+
+::: {.callout-note}
+## Credenciales: archivo `.env`, no el documento
+
+Los parámetros de conexión no están escritos en el código. Se leen de un archivo `.env` situado junto al `.qmd`, con una variable por línea:
+
+```
+IP_SERVER=...
+PORT=...
+DB_NAME=...
+USER=...
+DB_PASS=...
+```
+
+`readRenviron()` es base R —no añade dependencias— y carga ese archivo como variables de entorno de la sesión. `env_req()` detiene el render con un mensaje claro si falta alguna, en lugar de fallar más adelante con un error de conexión opaco. `DB_PASS` es la única opcional: si no está definida, la contraseña se pide por consola con `getPass()`, como antes.
+
+Dos advertencias sobre este archivo: **no debe versionarse** (añádelo a `.gitignore` si el directorio pasa a ser un repositorio), y el nombre `USER` coincide con una variable de entorno estándar del sistema, de modo que `readRenviron()` la sobrescribe dentro de la sesión de R. Si eso llegara a molestar, conviene renombrarla a `DB_USER` en `.env` y en el `dbConnect()`.
+:::
+```{r}
+#| label: hq-setup
+library(adegenet)
+library(spdep)
+library(ade4)
+library(adespatial)
+library(RPostgres)
+library(sf)
+library(dplyr)
+library(getPass)
+
+rm(list = ls())
+set.seed(1)
+
+df <- readRDS("/mnt/disco-c/PCAs/data/acp_mediana.rds")
+# Normalizar codigos en tabla de datos
+df$cod_sgc <- toupper(df$cod_sgc)
+# Parámetros de conexión: se leen de .env, no se escriben en el documento.
+# readRenviron() es base R y carga un archivo KEY=VALOR como variables de
+# entorno de la sesión; acepta comentarios con '#'.
+readRenviron(".env")
+
+env_req <- function(clave) {
+  v <- Sys.getenv(clave, unset = "")
+  if (!nzchar(v)) stop("Falta la variable '", clave, "' en .env", call. = FALSE)
+  v
+}
+
+con <- dbConnect(
+  Postgres(),
+  host     = env_req("IP_SERVER"),
+  port     = as.integer(env_req("PORT")),
+  dbname   = env_req("DB_NAME"),
+  user     = env_req("DB_USER"),
+  password = env_req("DB_PASS")
+)
+xy_raw <- 
+    read_sf(con,query="select
+  pm.cod_sgc,
+  pm.geom
+from vistas_aguas.geom_muestreo_36 pm;")
+dbDisconnect(con)
+
+str(df)
+# Reproyectar de geográficas a planas
+pts    <- st_transform(xy_raw, 9377)
+coords <- st_coordinates(pts)
+xy_tbl <- tibble(cod_sgc = pts$cod_sgc,
+                 X = coords[, 1] / 1000,
+                 Y = coords[, 2] / 1000)
+head(xy_tbl)
+
+```
+
+La división por 1000 que se aplica a las coordenadas proyectadas solo cambia la unidad de metros a kilómetros: no altera la posición relativa de los puntos ni la red de vecindades, y facilita la lectura de los gráficos.
+
+## Paso 2 — Unir y filtrar: un solo `data.frame` maestro
+
+`inner_join` en lugar de `left_join` + filtro de `NA` hace lo mismo en un paso y
+deja explícito que solo sobreviven los puntos con geometría.
+
+```{r}
+#| label: hq-join
+dat <- inner_join(df, xy_tbl, by = "cod_sgc")
+
+cat("puntos con química:", nrow(df),
+    "| con geometría:", nrow(dat),
+    "| descartados:", nrow(df) - nrow(dat), "\n")
+
+# Comprobaciones antes de seguir
+stopifnot(!any(duplicated(dat$cod_sgc)))   # una fila por punto
+sum(duplicated(dat[, c("X", "Y")]))        # coordenadas repetidas: rompen chooseCN
+```
+
+Los 3 registros descartados corresponden a muestras de agua superficial; su exclusión está justificada porque no pertenecen al sistema de flujo subterráneo que se quiere caracterizar.
+
+## La matriz **X**
+
+Esta es una decisión analítica que puede comprometer los resultados, igual que en un ACP clásico. Las concentraciones iónicas son
+**fuertemente asimétricas**: en estos datos el Mn va de 0.14 a 11 645 µg/L, casi
+cinco órdenes de magnitud. Sin transformar, un puñado de muestras muy
+mineralizadas dominaría el análisis y reproduciríamos el problema de los
+atípicos del ejemplo `rupica`, documentado en el test de la librería `adegenet`.
+
+Pero hay un problema anterior a la asimetría: **las concentraciones iónicas son datos composicionales**. Lo que caracteriza químicamente a un agua no es la cifra absoluta de cada ion —que depende de la dilución, de la recarga reciente o del caudal del día del muestreo— sino la *proporción* entre iones. Un log₁₀ aplicado ion por ion corrige la asimetría, pero deja intacta la componente de dilución: esta se cuela en el primer eje como un gradiente de «mineralización total» y compite con los contrastes de firma química, que son los que interesan aquí.
+
+La transformación que corresponde a ese tipo de dato es la **razón logarítmica centrada** (*centered log-ratio*, CLR) de Aitchison. Para una muestra $\mathbf{x} = (x_1, \dots, x_D)$ con todas sus partes estrictamente positivas:
+
+$$
+\mathrm{clr}(\mathbf{x}) = \left[\,\log\frac{x_1}{g(\mathbf{x})},\ \dots,\ \log\frac{x_D}{g(\mathbf{x})}\,\right],
+\qquad
+g(\mathbf{x}) = \left(\prod_{j=1}^{D} x_j\right)^{1/D}
+$$
+
+es decir, cada ion se expresa como el logaritmo de su razón frente a la **media geométrica de todos los iones de esa misma muestra**. El CLR hace dos cosas de una vez: corrige la asimetría (sigue siendo un logaritmo) y elimina el efecto de dilución (la referencia es interna a cada muestra, no una escala absoluta). Dos aguas con la misma firma química pero distinta dilución tienen el **mismo** vector CLR.
+
+::: {.callout-important}
+## El CLR se aplica solo al bloque de concentraciones, no a pH ni a T
+
+La pregunta de a qué variables aplicar la transformación no es cosmética, y la respuesta es que **únicamente a las diez concentraciones** (Ca, Mg, Na, K, HCO₃, SO₄, Cl, Si, Mn, As), es decir, exactamente las variables que antes llevaban log₁₀:
+
+- **El CLR está definido para composiciones**: partes estrictamente positivas cuya información está en las razones entre ellas. El pH no es una parte de ninguna composición; ya *es* un logaritmo ($-\log_{10} a_{\mathrm{H}^+}$) y vive en una escala de intervalo. La temperatura tampoco es una concentración y su cero (°C) es convencional.
+- **La media geométrica es la referencia de todas las razones.** Si se metieran pH y T dentro de $g(\mathbf{x})$, esa referencia mezclaría magnitudes inconmensurables y el CLR de cada ion pasaría a depender de la unidad en que se mida la temperatura. El resultado no sería interpretable.
+- En consecuencia, **pH y T entran sin transformar** y la comparabilidad entre los dos bloques la resuelve el escalado (`scale = TRUE`), igual que antes.
+:::
+
+Tres consecuencias prácticas de trabajar con CLR:
+
+- **Unidades homogéneas.** El CLR opera sobre razones entre partes, así que todas deben estar en la misma unidad. Mn y As vienen en µg/L y el resto en mg/L: se convierten a mg/L antes de transformar. La escala *total* de la composición, en cambio, es irrelevante —el CLR es invariante frente a ella—, que es justamente la propiedad que se busca.
+- **Los ceros hay que reemplazarlos, no desplazarlos.** El `log(0)` sigue siendo indefinido y aquí hay dos muestras con HCO₃ = 0. El truco anterior de sumar `1e-3` no es admisible en un marco composicional: alterar una parte cambia *todas* las razones de esa fila. Se usa el **reemplazo multiplicativo** (Martín-Fernández et al., 2003): el cero se sustituye por el 65 % del menor valor detectado de esa variable —un sustituto del límite de detección— y las partes restantes de la fila se reescalan para conservar el total, de modo que sus razones mutuas quedan intactas.
+- **La matriz queda singular.** Por construcción, las filas del bloque CLR suman cero, así que ese bloque tiene rango $D - 1 = 9$ en vez de 10. No es un error ni un obstáculo: la descomposición propia del sPCA simplemente encuentra una dirección con varianza nula. Conviene tenerlo presente al leer el número de ejes.
+
+Las columnas conservan los nombres de los iones (`Ca`, `Mg`, …) para que las cargas y los gráficos sigan siendo legibles, pero debe leerse cada una como **la coordenada CLR de ese ion**, no como su concentración.
+
+La estandarización de las variables en los muestreos observados, permite la contrucción de la matriz **X** como unica fuete de referencia para los datos.
+```{r}
+  #| label: hq-X
+vars_conc  <- c("Ca", "Mg", "Na", "K", "HCO3", "SO4", "Cl", "Si", "Mn", "As")
+vars_otras <- c("pH", "T")
+
+# 1. Unidades homogéneas: Mn y As están en µg/L, el resto en mg/L
+conc <- dat |>
+  mutate(across(all_of(c("Mn", "As")), ~ .x / 1000)) |>
+  select(all_of(vars_conc)) |>
+  as.matrix()
+
+# 2. Reemplazo multiplicativo de ceros (Martín-Fernández et al., 2003):
+#    el cero pasa a 0.65 * (menor valor detectado) y el resto de la fila
+#    se reescala para conservar el total, sin tocar sus razones mutuas.
+repl_ceros <- function(M, frac = 0.65) {
+  dl  <- apply(M, 2, function(x) frac * min(x[x > 0]))
+  tot <- rowSums(M)
+  for (i in seq_len(nrow(M))) {
+    z <- which(M[i, ] == 0)
+    if (!length(z)) next
+    M[i,  z] <- dl[z]
+    M[i, -z] <- M[i, -z] * (1 - sum(dl[z]) / tot[i])
+  }
+  M
+}
+
+# 3. Razón logarítmica centrada: log(x_j) - media de los log de la fila
+clr <- function(M) log(M) - rowMeans(log(M))
+
+conc <- repl_ceros(conc)
+stopifnot(all(conc > 0))
+
+X <- cbind(as.matrix(dat[, vars_otras]), clr(conc))
+rownames(X) <- dat$cod_sgc   # equivalente a los nombres de genotipo
+
+dim(X)
+stopifnot(is.numeric(X), !anyNA(X))
+max(abs(rowSums(X[, vars_conc])))   # ~0: confirma el centrado del CLR
+qr(scale(X))$rank                   # 11 de 12: la singularidad esperada
+round(head(X, 3), 3)
+```
+
+## La matriz `xy`
+
+Cada muestra tiene correspondencia con una ubicación absoluta en el espacio. Esa ubicación se maneja como una pieza aparte de `X` y es la fuente primaria de la matriz **L**, que usa las distancias entre puntos para construir la red de vecindades.
+
+```{r}
+#| label: hq-xy
+xy <- as.matrix(dat[, c("X", "Y")])
+rownames(xy) <- dat$cod_sgc
+
+stopifnot(nrow(xy) == nrow(X), identical(rownames(xy), rownames(X)))
+head(xy, 3)
+cat("extensión del área:", round(diff(range(xy[, 1])), 1), "x",
+    round(diff(range(xy[, 2])), 1), "km\n")
+```
+
+Con la información espacial cargada, verificada la unicidad de los puntos y proyectadas las coordenadas, es posible construir la red que permitirá evaluar la *autocorrelación espacial* entre los puntos muestreados.
+
+## La red de conexión
+
+Esta es una **decisión sustantiva** en cualquier escenario que trabaje con datos espaciales. En hidrogeoquímica
+el criterio razonable es la conectividad del flujo subterráneo o la presunción del mismo: dos puntos son
+vecinos si es plausible que pertenezcan al mismo sistema de flujo. 
+
+Esta sección evalúa dos escenarios. El primero asume el grafo de **Delaunay** (`type = 1`) como punto de partida: aquí no participa ningún criterio contextual, solo la vecindad euclidiana. Es la red por defecto, la que sirve de control.
+
+El segundo escenario deriva de un ejercicio previo en el que las fallas pueden constituir límites hidrogeológicos; esta red busca representar esas discontinuidades dentro de las vecindades de cada punto muestreado.
+
+```{r}
+#| label: hq-red
+#| fig-cap: "Red de conexión de Delaunay sobre los puntos de muestreo."
+cn <- chooseCN(xy, type = 1, ask = FALSE, plot.nb = FALSE,
+               result.type = "listw")
+cn
+
+plot(cn, xy)
+points(xy, pch = 20, col = "red")
+title("Red de Delaunay - puntos de muestreo")
+```
+
+La construcción de la red manual **no** parte de `cn`, sino de un grafo de **Gabriel** (`type = 2`); sobre él se aplican los cortes y las nuevas uniones.
+
+::: {.callout-note}
+## Dos diferencias, no una
+
+El grafo de Gabriel es un subgrafo del de Delaunay: conserva solo los enlaces cuyo círculo diametral no contiene otros puntos, así que es más ralo desde el inicio. Por tanto, la red manual difiere de `cn` por **dos** motivos superpuestos: el grafo base es distinto y, además, se le aplican cortes y uniones manuales.
+
+Esto conviene tenerlo presente al leer las comparaciones del resto del documento: la diferencia entre `cn` y `nb` no es atribuible únicamente a las fallas. Si se quisiera aislar el efecto de las barreras geológicas, habría que partir del mismo grafo base en los dos casos (`nb <- cn$neighbours`).
+:::
+
+
+```{r}
+# Contruir red Maual basada en nodos Gabriel
+nb <- chooseCN(xy, type = 2, ask = FALSE, plot.nb = FALSE,
+               result.type = "listw")
+
+nb <- nb$neighbours
+class(nb)              # "nb"
+attr(nb, "region.id")  # debería tener los IDs de XY
+# matriz de distancia
+d <- as.matrix(dist(xy))
+# Construir vector con tipo de puntos
+tipo <- dat$`Tipo de punto`[match(rownames(xy), dat$cod_sgc)]
+# Contruir función que devuelve posición a paritr de cod_sgc
+idx <- function(id) match(id, rownames(xy))
+
+add_link <- function(nb, a, b) {
+  i <- idx(a); j <- idx(b); stopifnot(!is.na(i), !is.na(j), i != j)
+  put <- function(v, k) if (identical(v, 0L)) as.integer(k) else sort(unique(c(v, as.integer(k))))
+  nb[[i]] <- put(nb[[i]], j); nb[[j]] <- put(nb[[j]], i)
+  nb
+}
+rm_link <- function(nb, a, b) {
+  i <- idx(a); j <- idx(b); stopifnot(!is.na(i), !is.na(j))
+  del <- function(v, k) { v <- setdiff(v, k); if (!length(v)) 0L else as.integer(v) }
+  nb[[i]] <- del(nb[[i]], j); nb[[j]] <- del(nb[[j]], i)
+  nb
+}
+vecinos <- function(nb, id) {                      # inspeccionar antes de tocar
+  v <- nb[[idx(id)]]; if (identical(v, 0L)) return(character(0))
+  data.frame(vecino = rownames(xy)[v], dist_m = round(d[idx(id), v]), tipo = tipo[v])
+}
+
+# Uso de función de mapeo
+
+# 1. Base vacía (si partes de cero)
+n <- nrow(xy)
+attr(nb, "region.id") <- rownames(xy)
+
+# 2. Vectores de conexión
+conectar_de <- c("MN-7-TOC")
+conectar_a  <- c("MN-2-TOC")
+
+# 3. Vectores de corte
+cortar_de <- c(  "AL-1-TOC",   "AL-1-TOC",   "AL-10-TOC",  "AL-10-TOC",  "AL-10-TOC",  "AL-115-TOC", "AL-115-TOC",
+  "AL-4-TOC",   "AL-6-TOC",   "AL-8-TOC",   "AL-8-TOC",   "AL-8-TOC",   "AL-8-TOC",   "AL-8-TOC",
+  "AL-82-TOC",  "AL-112-TOC", "AL-112-TOC", "AL-113-TOC", "MN-104-TOC", "MN-105-TOC", "MN-12-TOC",
+  "MN-12-TOC",  "MN-14-TOC",  "MN-16-TOC",  "MN-2-TOC",   "MN-2-TOC",   "MN-23-TOC",  "MN-24-TOC",
+  "MN-25-TOC",  "MN-3-TOC",   "MN-3-TOC",   "MN-3-TOC",   "MN-31-TOC",  "MN-32-TOC",  "MN-40-TOC",
+  "MN-7-TOC",   "MN-82-TOC",  "MN-98-TOC",  "PZ-23-TOC")
+
+
+cortar_a  <- c( "MN-23-TOC",  "MN-25-TOC",  "AL-4-TOC",   "MN-14-TOC",  "PZ-23-TOC",  "MN-23-TOC",  "MN-31-TOC",
+  "MN-27-TOC",  "PZ-23-TOC",  "MN-104-TOC", "MN-16-TOC",  "MN-17-TOC",  "MN-2-TOC",   "MN-8-TOC",
+  "MN-31-TOC",  "AL-113-TOC", "MN-24-TOC",  "MN-39-TOC",  "MN-82-TOC",  "MN-88-TOC",  "MN-2-TOC",
+  "MN-98-TOC",  "MN-81-TOC",  "MN-8-TOC",   "MN-8-TOC",   "MN-9-TOC",   "MN-94-TOC",  "PZ-2-TOC",
+  "MN-32-TOC",  "MN-38-TOC",  "MN-86-TOC",  "MN-98-TOC",  "PZ-18-TOC",  "MN-98-TOC",  "MN-7-TOC",
+  "MN-78-TOC",  "PZ-5-TOC",   "PZ-23-TOC",  "PZ-5-TOC")
+
+# 4. Aplicar
+for (i in seq_along(conectar_de)) nb <- add_link(nb, conectar_de[i], conectar_a[i])
+for (i in seq_along(cortar_de))   nb <- rm_link(nb, cortar_de[i], cortar_a[i])
+
+# 5. Verificar
+vecinos(nb, "MN-24-TOC")
+which(card(nb) == 0)   # nodos sin ningún vecino -> revisar antes de Moran's I
+
+# Graficar
+
+plot(nb, xy)
+points(xy, pch = 20, col = "red")
+title("Red Manual - puntos de muestreo")
+
+```
+
+El corte deja el punto `MN-24-TOC` sin vecinos (`card(nb) == 0`): queda aislado por las fallas que lo rodean y, en consecuencia, no aporta información al índice de Moran, aunque sí a la varianza.
+
+La figura siguiente compara de una sola mirada la red de Delaunay `cn` con la edición manual `nb`, condicionada por los límites geológicos que priorizan las fallas como barreras de conductividad hidráulica (esto es una hipotesis, parte de la presunción).
+
+```{r}
+plot(cn, xy, col = "grey70", lwd = 1)          # red original (Delaunay) en gris, de fondo
+plot(nb, xy, col = "blue", lwd = 2, add = TRUE) # red editada, encima, en azul
+points(xy, pch = 20, col = "red")
+title("Comparación: Red de Delaunay (gris) vs Red Manual editada (azul)")
+```
+
+## El sPCA
+
+Reunidos los tres elementos (`X`, `xy` y la red), es posible ajustar el sPCA con cada red e iniciar la interpretación de resultados.
+
+```{r}
+#| label: hq-spca
+#| fig-cap: "Autovalores del sPCA hidrogeoquímico."
+# Red método Delaunay
+hq.spca.cn <- spca(X, xy = xy, cn = cn,
+                center = TRUE, scale = TRUE,
+                scannf = FALSE, nfposi = 2, nfnega = 2)
+hq.spca.cn
+
+barplot(hq.spca.cn$eig, col = spectral(length(hq.spca.cn$eig)),
+        main = "sPCA hidrogeoquímica: Red Delaunay - autovalores")
+legend("topright", fill = spectral(2),
+       leg = c("Estructuras globales", "Estructuras locales"))
+abline(h = 0, col = "grey")
+
+
+# Red Modificada manualmente
+hq.spca.nb <- spca(X, xy = xy, cn = nb,
+                center = TRUE, scale = TRUE,
+                scannf = FALSE, nfposi = 2, nfnega = 2)
+hq.spca.nb
+
+barplot(hq.spca.nb$eig, col = spectral(length(hq.spca.nb$eig)),
+        main = "sPCA hidrogeoquímica: Red Modificada - autovalores")
+legend("topright", fill = spectral(2),
+       leg = c("Estructuras globales", "Estructuras locales"))
+abline(h = 0, col = "grey")
+```
+
+La tabla de autovalores se construye a partir de los objetos ya ajustados, de modo que no puede quedar desfasada respecto a lo que devuelve el código:
+
+```{r}
+#| label: tabla-autovalores
+tabla_eig <- function(sp, red) {
+  ev  <- sp$eig
+  pos <- head(ev[ev > 0], 3)
+  neg <- head(rev(ev[ev < 0]), 2)          # los dos más negativos
+  data.frame(Red = red,
+             `λ1`     = round(pos[1], 3),
+             `λ2`     = round(pos[2], 3),
+             `λ3`     = round(pos[3], 3),
+             `λ(n-1)` = round(neg[2], 3),
+             `λ(n)`   = round(neg[1], 3),
+             `n⁺`     = sum(ev > 0),
+             `n⁻`     = sum(ev < 0),
+             check.names = FALSE)
+}
+eig_tab <- rbind(tabla_eig(hq.spca.cn, "Delaunay"),
+                 tabla_eig(hq.spca.nb, "Manual"))
+knitr::kable(eig_tab, row.names = FALSE, align = "lrrrrrrr",
+  caption = paste("Autovalores del sPCA con cada red: los tres primeros",
+                  "positivos, los dos más negativos y el número total de cada signo."))
+```
+
+Los autovalores calculados con la red manual son mayores que los de la red genérica en todos los términos comparables: el producto varianza × $I$ de Moran sube en los dos ejes positivos retenidos ($\lambda_1$: `r round(hq.spca.cn$eig[1], 3)` → `r round(hq.spca.nb$eig[1], 3)`; $\lambda_2$: `r round(hq.spca.cn$eig[2], 3)` → `r round(hq.spca.nb$eig[2], 3)`) y también crece en magnitud el más negativo (`r round(rev(hq.spca.cn$eig)[1], 3)` → `r round(rev(hq.spca.nb$eig)[1], 3)`). En ambos casos los dos primeros autovalores positivos son los mayores, pero conviene no exagerar la separación: $\lambda_3$ vale `r round(hq.spca.cn$eig[3], 3)` con Delaunay y `r round(hq.spca.nb$eig[3], 3)` con la red manual, de modo que el descenso es gradual y no un salto neto. La decisión de retener dos ejes no se apoya solo en esta tabla, sino en el `screeplot` y en los tests de permutación que siguen. El `screeplot` permite verificar si la mejora de la red manual proviene de la varianza, de la autocorrelación o de ambas.
+
+## Descomposición de los autovalores: `screeplot`
+
+Este es el gráfico diagnóstico central del método.
+
+```{r}
+#| label: screeplot
+#| fig-cap: "Descomposición de cada autovalor en varianza (eje x) y autocorrelación espacial I de Moran (eje y)."
+par(mfrow = c(1, 2))
+screeplot(hq.spca.cn,main = 'Delaunay')
+screeplot(hq.spca.nb,main = 'Red Manual')
+
+```
+
+
+
+
+**Cómo leerlo.** Cada autovalor $\lambda_i$ se ubica según sus dos componentes.
+El **rectángulo punteado** delimita el rango alcanzable:
+
+- La **línea vertical derecha** es la varianza máxima que puede alcanzar una
+  combinación lineal de las variables, es decir, la del primer eje de un ACP
+  ordinario.
+- Las **dos líneas horizontales** son los valores máximo y mínimo de $I$ de
+  Moran, dados los pesos espaciales usados.
+
+Un autovalor solo merece interpretarse si está **lejos del origen en ambos
+ejes** y bien separado del resto. Aquí $\lambda_1$ es claramente el mayor en varianza; sin embargo, $\lambda_1$ y $\lambda_2$ exhiben valores de $I$ de Moran muy similares, de modo que ambos comunican estructuras globales que ameritan interpretación. Los autovalores negativos, en cambio, quedan cerca del origen en el eje de varianza.
+
+
+::: {.callout-important}
+## Las dos redes se mantienen en paralelo
+
+En términos generales, los resultados alcanzados con la red manual son ligeramente mejores que los de la red de Delaunay. Aun así, el resto del documento **no descarta** la red por defecto: cada diagnóstico —tests de permutación, resumen del sPCA, descomposición $\mathrm{var} \times I$, clasificación jerárquica y coherencia espacial— se calcula con las dos redes y se presenta en paralelo (`hq.spca.cn` frente a `hq.spca.nb`).
+
+El objetivo es hacer explícito **qué cambia y qué no cambia** cuando la vecindad se define solo por geometría euclidiana frente a cuando se le imponen las fallas como barreras de conductividad hidráulica. La red manual se usa como referencia para la interpretación sustantiva; la de Delaunay, como control.
+:::
+
+## Tests de estructura espacial significativa: global y local
+
+Los tests por permutación de Jombart *et al.* (2008) refuerzan la decisión de
+interpretar o no una estructura. Cada uno detecta un tipo:
+
+- `global.rtest`: detecta estructuras **globales** (autocorrelación positiva).
+- `local.rtest`: detecta estructuras **locales** (autocorrelación negativa).
+
+### Evaluación de estructuras globales
+
+El test se ejecuta con las dos redes y con la misma semilla, de modo que la única diferencia entre ambos resultados es la definición de vecindad.
+
+```{r}
+#| label: gtest
+#| fig-cap: "Test global con las dos redes: el estadístico observado (punto negro) frente a su distribución nula."
+# El objeto que devuelve as.randtest() guarda el resumen de la distribución
+# nula en $expvar (Std.Obs, Expectation, Variance); no expone un vector $sim.
+resumen_rtest <- function(t, red) data.frame(
+  red      = red,
+  obs      = round(t$obs, 4),
+  esperado = round(t$expvar[["Expectation"]], 4),
+  std_obs  = round(t$expvar[["Std.Obs"]], 2),
+  p_valor  = t$pvalue)
+
+set.seed(23)
+myGtest.cn <- global.rtest(X, hq.spca.cn$lw, nperm = 9999)
+set.seed(23)
+myGtest.nb <- global.rtest(X, hq.spca.nb$lw, nperm = 9999)
+
+rbind(resumen_rtest(myGtest.cn, "Delaunay"),
+      resumen_rtest(myGtest.nb, "Manual"))
+
+par(mfrow = c(1, 2))
+plot(myGtest.cn, main = "Test global - Delaunay")
+plot(myGtest.nb, main = "Test global - Manual")
+```
+
+Hay evidencia fuerte de estructura espacial global con **las dos** redes, de modo que la señal no es un producto de cómo se definió la vecindad: con Delaunay el estadístico observado es `r round(myGtest.cn$obs, 3)` frente a `r round(myGtest.cn$expvar[['Expectation']], 3)` esperado bajo aleatoriedad ($p$ = `r format(myGtest.cn$pvalue, scientific = FALSE)`), y con la red manual `r round(myGtest.nb$obs, 3)` frente a `r round(myGtest.nb$expvar[['Expectation']], 3)` ($p$ = `r format(myGtest.nb$pvalue, scientific = FALSE)`). En ninguno de los dos casos es un resultado marginal.
+
+La comparación relevante está en la separación respecto al promedio nulo: `r round(myGtest.cn$expvar[['Std.Obs']], 2)` desviaciones estándar con la red por defecto frente a `r round(myGtest.nb$expvar[['Std.Obs']], 2)` con la red que incorpora las fallas.
+
+### Evaluación de estructuras locales
+
+```{r}
+#| label: ltest
+#| dependson: gtest
+#| fig-cap: "Test local con las dos redes: el estadístico observado cae dentro de la distribución nula en ambos casos."
+set.seed(23)
+myLtest.cn <- local.rtest(X, hq.spca.cn$lw, nperm = 9999)
+set.seed(23)
+myLtest.nb <- local.rtest(X, hq.spca.nb$lw, nperm = 9999)
+
+rbind(resumen_rtest(myLtest.cn, "Delaunay"),
+      resumen_rtest(myLtest.nb, "Manual"))
+
+par(mfrow = c(1, 2))
+plot(myLtest.cn, main = "Test local - Delaunay")
+plot(myLtest.nb, main = "Test local - Manual")
+```
+
+En contraste, no hay evidencia de estructura espacial local **con ninguna de las dos redes**: el estadístico observado queda por debajo del valor esperado bajo aleatoriedad tanto con Delaunay (`r round(myLtest.cn$obs, 3)` frente a `r round(myLtest.cn$expvar[['Expectation']], 3)`, $p$ = `r format(myLtest.cn$pvalue, scientific = FALSE)`) como con la red manual (`r round(myLtest.nb$obs, 3)` frente a `r round(myLtest.nb$expvar[['Expectation']], 3)`, $p$ = `r format(myLtest.nb$pvalue, scientific = FALSE)`).
+
+El patrón de «parcheo» o contraste abrupto entre vecinos que sugieren los ejes negativos no es distinguible del ruido. Como el bloque CLR deja la matriz con rango `r length(hq.spca.nb$eig)`, esos ejes son `Axis 10` y `Axis 11`: su $I$ de Moran en la red manual es -0.27 y -0.32, y sus autovalores (`r round(hq.spca.nb$eig[10], 3)` y `r round(hq.spca.nb$eig[11], 3)`) son varias veces menores en magnitud que $\lambda_1$. Que el rechazo se repita con la red por defecto refuerza la conclusión: la ausencia de estructura local no es consecuencia de haber cortado enlaces en las fallas.
+
+## Síntesis de resultados
+
+El gráfico resumen del objeto `spca` reúne los mapas de los dos primeros componentes, el diagrama de autovalores y las cargas de las variables.
+
+```{r}
+#| label: spca-plot-cn
+#| fig-cap: "Resumen del sPCA con la red de Delaunay: mapas de los componentes 1 y 2, autovalores y cargas."
+plot(hq.spca.cn)
+```
+
+```{r}
+#| label: spca-plot-nb
+#| fig-cap: "Resumen del sPCA con la red manual: mapas de los componentes 1 y 2, autovalores y cargas."
+plot(hq.spca.nb)
+```
+
+Los dos resúmenes se leen en paralelo. El componente 1 debería reproducir el mismo gradiente regional con ambas redes; la comparación informativa está en el componente 2, donde conviene observar si la red con fallas agrupa los valores extremos en bloques más definidos que la red por defecto.
+
+Para separar lo que aporta el espacio de lo que ya aportaba la varianza, se ajusta un ACP clásico sobre la **misma** matriz transformada (`$tab` ya viene centrada y escalada) y se comparan las cargas del segundo eje:
+
+::: {.callout-important}
+## La comparación solo tiene sentido sobre la misma matriz
+
+Ambos métodos deben partir de las mismas variables con las mismas transformaciones: razón logarítmica centrada (CLR) para el bloque de concentraciones, pH y T sin transformar, y escalado de todas las entradas. Aquí eso está garantizado por construcción, porque el ACP se ajusta sobre `hq.spca.nb$tab`, que **es** la matriz que el sPCA ya centró y escaló; por eso se pasa `center = FALSE, scale = FALSE`, para no transformarla dos veces.
+
+Además, `hq.spca.cn$tab` y `hq.spca.nb$tab` son idénticas —el centrado y el escalado no dependen de la red de conexión, solo de `X`—, así que un **único** ACP clásico sirve de referencia común para las dos comparaciones.
+:::
+
+
+```{r}
+#| label: comp-pca
+pca_conv <- dudi.pca(hq.spca.nb$tab, center = FALSE, scale = FALSE,
+                     scannf = FALSE, nf = 3)
+
+stopifnot(all.equal(hq.spca.cn$tab, hq.spca.nb$tab))   # misma matriz de partida
+
+# El signo de un eje factorial es arbitrario: restar cargas sin alinearlo
+# primero produce diferencias que solo reflejan la orientación del eje. Se toma
+# el sPCA manual como referencia y se voltea el eje del ACP o del sPCA Delaunay
+# cuando sus scores correlacionan negativamente con él.
+signo <- function(M, ref) { s <- sign(diag(cor(M, ref))); s[s == 0] <- 1; s }
+ref   <- as.matrix(hq.spca.nb$li[, 1:2])
+s_acp <- signo(as.matrix(pca_conv$li[, 1:2]),   ref)
+s_del <- signo(as.matrix(hq.spca.cn$li[, 1:2]), ref)
+rbind(ACP = s_acp, Delaunay = s_del)   # 1 = eje ya orientado, -1 = volteado
+
+comp <- data.frame(PCA_clasico   = pca_conv$c1[, 2]   * s_acp[2],
+                   sPCA_Delaunay = hq.spca.cn$c1[, 2] * s_del[2],
+                   sPCA_Manual   = hq.spca.nb$c1[, 2],
+                   row.names     = rownames(hq.spca.nb$c1))
+comp$dif_Delaunay <- abs(comp$PCA_clasico - comp$sPCA_Delaunay)
+comp$dif_Manual   <- abs(comp$PCA_clasico - comp$sPCA_Manual)
+
+# Variables ordenadas por cuánto cambia su peso al pasar del ACP al sPCA manual
+round(comp[order(-comp$dif_Manual), ], 3)
+
+# Correspondencia entre los ejes del ACP y los de cada sPCA
+round(cor(pca_conv$li, hq.spca.cn$li[, 1:2]), 2)
+round(cor(pca_conv$li, hq.spca.nb$li[, 1:2]), 2)
+
+# ¿Las dos redes producen los mismos ejes?
+round(cor(hq.spca.cn$li[, 1:2], hq.spca.nb$li[, 1:2]), 2)
+```
+
+El signo de un eje factorial es arbitrario, así que en las tres matrices de correlación importa la **magnitud**, no el signo. En el cuadro de cargas, en cambio, el signo sí se alineó de antemano (vector `s_acp` / `s_del`), porque ahí las cargas se restan entre sí. La última matriz compara las dos soluciones sPCA entre sí: valores cercanos a 1 en la diagonal (`r round(abs(cor(hq.spca.cn$li[, 1], hq.spca.nb$li[, 1])), 2)` y `r round(abs(cor(hq.spca.cn$li[, 2], hq.spca.nb$li[, 2])), 2)`) indican que cambiar la red no reorienta los componentes, sino que solo ajusta cuánta autocorrelación captura cada uno.
+
+### ¿Cuánto aporta realmente el espacio?
+
+La comparación de cargas es cualitativa. La pregunta se responde mejor descomponiendo cada eje —de ambos métodos— en los dos términos del criterio $C = \mathrm{var} \times I$: si el sPCA aporta algo, sus ejes deben ganar autocorrelación a cambio de poca varianza.
+
+La descomposición se hace **con las dos redes**. Cada bloque evalúa los ejes del ACP clásico y los del sPCA correspondiente bajo los pesos espaciales de esa red: el $I$ de Moran solo es comparable dentro de una misma definición de vecindad, porque su rango alcanzable cambia con la red.
+
+```{r}
+#| label: var-moran
+n <- nrow(hq.spca.nb$li)
+
+moran <- function(v, lw) { v <- as.numeric(scale(v, scale = FALSE))
+                           sum(v * lag.listw(lw, v)) / sum(v^2) }
+varp  <- function(v) var(v) * (n - 1) / n
+
+desc <- function(M, nm, lw, red) data.frame(
+  red = red,
+  eje = paste0(nm, seq_len(ncol(M))),
+  var = apply(M, 2, varp),
+  I   = apply(M, 2, moran, lw = lw),
+  C   = apply(M, 2, varp) * apply(M, 2, moran, lw = lw))
+
+res <- rbind(
+  desc(as.matrix(pca_conv$li[, 1:3]),   "ACP",  hq.spca.cn$lw, "Delaunay"),
+  desc(as.matrix(hq.spca.cn$li[, 1:2]), "sPCA", hq.spca.cn$lw, "Delaunay"),
+  desc(as.matrix(pca_conv$li[, 1:3]),   "ACP",  hq.spca.nb$lw, "Manual"),
+  desc(as.matrix(hq.spca.nb$li[, 1:2]), "sPCA", hq.spca.nb$lw, "Manual"))
+data.frame(res[, 1:2], round(res[, -(1:2)], 3), row.names = NULL)
+
+# Rango alcanzable del I de Moran con cada red
+rangos <- rbind(Delaunay = moran.bounds(hq.spca.cn$lw),
+                Manual   = moran.bounds(hq.spca.nb$lw))
+round(rangos, 3)
+
+# Cuánto gana el segundo eje del sPCA sobre el segundo del ACP, con cada red
+gan <- function(red) {
+  a <- res[res$red == red & res$eje == "ACP2",  ]
+  b <- res[res$red == red & res$eje == "sPCA2", ]
+  c(var_pct = round(100 * (b$var / a$var - 1), 1),
+    I_pct   = round(100 * (b$I   / a$I   - 1), 1),
+    C_pct   = round(100 * (b$C   / a$C   - 1), 1))
+}
+ganancias <- rbind(Delaunay = gan("Delaunay"), Manual = gan("Manual"))
+ganancias
+```
+
+Con la red manual el detalle es el siguiente:
+
+```{r}
+#| label: var-moran-manual
+m <- res[res$red == "Manual", ]
+knitr::kable(data.frame(Eje            = m$eje,
+                        Varianza       = round(m$var, 3),
+                        `I de Moran`   = round(m$I,   3),
+                        `C = var × I`  = round(m$C,   3),
+                        check.names = FALSE),
+             row.names = FALSE, align = "lrrr",
+             caption = paste("Descomposición var × I de los ejes del ACP clásico y",
+                             "del sPCA, bajo los pesos de la red manual."))
+```
+
+El resultado separa con claridad los dos ejes:
+
+```{r}
+#| label: gan-eje1
+g1 <- function(red) {
+  a <- res[res$red == red & res$eje == "ACP1",  ]
+  b <- res[res$red == red & res$eje == "sPCA1", ]
+  c(var_pct = round(100 * (b$var / a$var - 1), 1),
+    I_pct   = round(100 * (b$I   / a$I   - 1), 1),
+    C_pct   = round(100 * (b$C   / a$C   - 1), 1))
+}
+rbind(Delaunay = g1("Delaunay"), Manual = g1("Manual"))
+```
+
+- **Eje 1: el espacio casi no aporta.** El sPCA cede un `r abs(g1("Manual")["var_pct"])` % de varianza (`r round(res$var[res$red=="Manual" & res$eje=="ACP1"], 3)` → `r round(res$var[res$red=="Manual" & res$eje=="sPCA1"], 3)`) para ganar un `r g1("Manual")["I_pct"]` % de autocorrelación (`r round(res$I[res$red=="Manual" & res$eje=="ACP1"], 3)` → `r round(res$I[res$red=="Manual" & res$eje=="sPCA1"], 3)`), con un saldo de solo `r g1("Manual")["C_pct"]` % en el criterio $C$. El eje de máxima varianza *ya era*, casi exactamente, el de máxima organización espacial, así que apenas hay margen de mejora. Esto no es un fallo del método sino un resultado sustantivo: el contraste químico dominante es intrínsecamente regional.
+- **Eje 2: aquí sí aporta, y es medible.** El sPCA cede un `r abs(ganancias["Manual", "var_pct"])` % de varianza (`r round(res$var[res$red=="Manual" & res$eje=="ACP2"], 3)` → `r round(res$var[res$red=="Manual" & res$eje=="sPCA2"], 3)`) y a cambio gana un **`r ganancias["Manual", "I_pct"]` % de autocorrelación** (`r round(res$I[res$red=="Manual" & res$eje=="ACP2"], 3)` → `r round(res$I[res$red=="Manual" & res$eje=="sPCA2"], 3)`), lo que eleva el criterio $C$ en un `r ganancias["Manual", "C_pct"]` % (`r round(res$C[res$red=="Manual" & res$eje=="ACP2"], 3)` → `r round(res$C[res$red=="Manual" & res$eje=="sPCA2"], 3)`). El segundo eje del sPCA queda con una autocorrelación comparable a la del primero y muy por encima de la de cualquiera de los tres primeros ejes del ACP. Con esta red el rango alcanzable de $I$ va de `r round(rangos["Manual", "Imin"], 3)` a `r round(rangos["Manual", "Imax"], 3)`, de modo que el eje pasa de explotar el `r round(100 * res$I[res$red=="Manual" & res$eje=="ACP2"] / rangos["Manual", "Imax"])` % del máximo posible al `r round(100 * res$I[res$red=="Manual" & res$eje=="sPCA2"] / rangos["Manual", "Imax"])` %.
+
+En otras palabras, el intercambio que define al método —sacrificar varianza para ganar estructura espacial— solo resulta rentable en el segundo eje, y allí es sustancial.
+
+**La misma lectura con la red por defecto.** La tabla `ganancias` repite el cálculo para las dos redes y permite responder si el intercambio depende de la vecindad elegida: con Delaunay el segundo eje cede un `r abs(ganancias["Delaunay", "var_pct"])` % de varianza para ganar un `r ganancias["Delaunay", "I_pct"]` % de $I$ (criterio $C$: `r ganancias["Delaunay", "C_pct"]` %), frente a `r abs(ganancias["Manual", "var_pct"])` % y `r ganancias["Manual", "I_pct"]` % (criterio $C$: `r ganancias["Manual", "C_pct"]` %) con la red manual. Si el patrón se sostiene con ambas —ganancia nula en el eje 1, sustancial en el eje 2— entonces es una propiedad de los datos y no de la red; las fallas solo modulan cuánto se gana.
+
+El primer eje es prácticamente el mismo en ambos métodos ($r$ = `r round(abs(cor(pca_conv$li[, 1], hq.spca.nb$li[, 1])), 2)`): ya era la estructura dominante y el sPCA no necesita modificarlo. El segundo eje, en cambio, no coincide con ningún eje del ACP clásico: correlaciona `r round(abs(cor(pca_conv$li[, 2], hq.spca.nb$li[, 2])), 2)` con el segundo y `r round(abs(cor(pca_conv$li[, 3], hq.spca.nb$li[, 2])), 2)` con el tercero, es decir, el sPCA **recombina** dos direcciones del ACP clásico para construir una sola con mayor coherencia espacial.
+
+## Qué variables de X constituyen cada componente
+
+La clasificación jerárquica de la sección siguiente **no** se hace sobre las doce
+variables de `X`, sino sobre los *scores* de los dos primeros componentes. Esos
+scores son combinaciones lineales de las doce variables, así que la pregunta de
+«sobre qué se está agrupando» se responde mirando las **cargas** (`$c1`) de cada
+análisis. La tabla que sigue las reúne para los tres: ACP clásico, sPCA con la
+red de Delaunay y sPCA con la red manual.
+
+Dos precauciones hacen que la comparación sea legítima:
+
+- **Misma matriz de partida.** Los tres análisis se ajustan sobre `hq.spca.nb$tab`
+  (CLR en las concentraciones, pH y T sin transformar, todo centrado y escalado),
+  de modo que las cargas están en la misma escala.
+- **Mismo signo.** El signo de un eje factorial es arbitrario. Aquí se alinea el
+  de cada eje con el del sPCA manual usando los vectores `s_acp` y `s_del` que ya
+  se calcularon; sin ese paso, un eje volteado parecería tener cargas opuestas.
+
+Para decidir qué variables son **constitutivas** de un componente se usa el
+criterio de contribución media. Como $\sum_j c_{1j}^2 = 1$ sobre las $p = 12$
+variables, la contribución media de una variable es $1/p$ y el umbral
+equivalente en carga es $1/\sqrt{p} \approx 0.289$: se marcan las variables que
+aportan más que si todas contribuyeran por igual.
+
+```{r}
+#| label: cargas-comp
+cargas <- data.frame(
+  `ACP 1` = pca_conv$c1[, 1]   * s_acp[1],
+  `ACP 2` = pca_conv$c1[, 2]   * s_acp[2],
+  `Del 1` = hq.spca.cn$c1[, 1] * s_del[1],
+  `Del 2` = hq.spca.cn$c1[, 2] * s_del[2],
+  `Man 1` = hq.spca.nb$c1[, 1],
+  `Man 2` = hq.spca.nb$c1[, 2],
+  check.names = FALSE, row.names = rownames(hq.spca.nb$c1))
+
+umbral <- 1 / sqrt(nrow(cargas))          # contribución mayor que la media
+round(umbral, 3)
+
+marca <- function(v) ifelse(abs(v) >= umbral,
+                            paste0(sprintf("%.3f", v), " *"),
+                            sprintf("%.3f", v))
+knitr::kable(as.data.frame(lapply(cargas, marca), check.names = FALSE,
+                           row.names = rownames(cargas)),
+             align = "r",
+             caption = paste0("Cargas de las 12 variables de X sobre los dos primeros ",
+                              "componentes de cada análisis, con el signo alineado al ",
+                              "sPCA manual. El asterisco marca las variables ",
+                              "constitutivas (|carga| >= ", round(umbral, 3), ")."))
+```
+
+```{r}
+#| label: cargas-resumen
+constitutivas <- function(v) {
+  sel <- abs(v) >= umbral
+  if (!any(sel)) return("—")
+  o <- order(-abs(v[sel]))
+  paste0(rownames(cargas)[sel][o],
+         ifelse(v[sel][o] > 0, " (+)", " (−)"), collapse = ", ")
+}
+
+resumen_cargas <- data.frame(
+  `Análisis`   = rep(c("ACP clásico", "sPCA Delaunay", "sPCA Manual"), each = 2),
+  Componente   = rep(1:2, 3),
+  `n vars`     = as.vector(colSums(abs(cargas) >= umbral)),
+  `% del eje`  = round(100 * sapply(cargas, function(v) sum(v[abs(v) >= umbral]^2)), 1),
+  `Variables constitutivas` = sapply(cargas, constitutivas),
+  check.names = FALSE, row.names = NULL)
+
+knitr::kable(resumen_cargas, row.names = FALSE, align = "llrrl",
+             caption = paste("Variables de X constitutivas de cada componente.",
+                             "La columna '% del eje' es la fracción de la norma del",
+                             "eje que aportan entre todas ellas; el signo indica el",
+                             "extremo del componente hacia el que empuja cada variable."))
+```
+
+**Cómo leer las dos tablas.**
+
+- **El componente 1 es el mismo objeto en los tres análisis.** Las cinco
+  variables constitutivas coinciden exactamente —T (−), Ca (+), SO₄ (+),
+  Na (−), Cl (−)— y su orden de magnitud apenas cambia. Es coherente con las
+  correlaciones ya vistas ($|r| \geq 0.98$ entre el primer eje del ACP y los de
+  ambos sPCA). Al agrupar sobre este eje, los tres métodos usan la misma
+  información: el contraste entre aguas cálcico-sulfatadas y aguas
+  termales-sódico-cloruradas.
+- **El componente 2 es donde los métodos difieren, y la diferencia es una
+  sustitución concreta.** Los tres coinciden en Si (+) y Mg (−), pero el tercer
+  elemento cambia: el ACP clásico lo construye con **As (+)** (carga
+  `r round(cargas["As", "ACP 2"], 3)`), mientras que **ambos** sPCA lo sustituyen
+  por **HCO₃ (+)** (`r round(cargas["HCO3", "Man 2"], 3)` con la red manual,
+  frente a `r round(cargas["HCO3", "ACP 2"], 3)` en el ACP). Es exactamente la
+  recombinación que anunciaba la matriz de correlaciones: el segundo eje del
+  sPCA mezcla el segundo y el tercer eje del ACP.
+- **Las dos redes producen el mismo conjunto constitutivo.** Delaunay y la red
+  manual seleccionan las mismas variables en los dos componentes; lo que cambia
+  son los pesos secundarios. En el componente 2 de la red manual, Na
+  (`r round(cargas["Na", "Man 2"], 3)`) y Cl (`r round(cargas["Cl", "Man 2"], 3)`)
+  quedan justo por debajo del umbral, mientras que con Delaunay están más lejos:
+  la red que incorpora las fallas arrastra algo de la firma salina hacia el
+  segundo eje. Esto acota lo que puede explicar el índice de Rand ajustado entre
+  las dos particiones: no agrupan sobre variables distintas, sino sobre las
+  mismas variables con pesos ligeramente distintos.
+- **Los ejes del sPCA están más repartidos.** La columna `% del eje` baja al
+  pasar del ACP al sPCA (componente 2: `r resumen_cargas[2, "% del eje"]` % →
+  `r resumen_cargas[6, "% del eje"]` %). Optimizar var × $I$ en lugar de solo la
+  varianza produce componentes menos concentrados en unas pocas variables, con
+  más variables aportando de forma intermedia.
+
+::: {.callout-note}
+## El umbral es una convención, no un corte natural
+
+Varias variables quedan cerca de 0.289 por ambos lados (Na y Cl en el
+componente 2 de la red manual; As en el componente 2 de los sPCA). La tabla de
+cargas completa está justo encima precisamente para eso: la lista de
+«constitutivas» resume, pero la lectura fina debe hacerse sobre los valores.
+:::
+
+## Clasificación jerárquica sobre los componentes espaciales
+
+Los dos componentes significativos resumen la señal hidrogeoquímica que además está organizada en el espacio. Agrupar los puntos sobre **esas** coordenadas —y no sobre las 12 variables originales— tiene una consecuencia deliberada: el ruido sin estructura espacial ya quedó fuera, en los ejes que los tests desestimaron.
+
+Se usa distancia euclidiana sobre los scores y el criterio de **Ward** (`ward.D2`), que minimiza la varianza intragrupo y produce grupos compactos, coherentes con la geometría del plano factorial.
+
+La clasificación se repite sobre los scores de **cada** sPCA, con el mismo método y el mismo corte, para poder atribuir cualquier diferencia entre particiones únicamente a la red de conexión.
+
+```{r}
+#| label: hclust
+#| fig-cap: "Dendrogramas de Ward sobre los scores de los dos componentes espaciales, con cada red."
+#| fig-width: 11
+#| fig-height: 6
+library(cluster)
+
+scores <- function(sp) { m <- sp$li[, 1:2]; colnames(m) <- c("C1", "C2"); m }
+
+sc_cn <- scores(hq.spca.cn); d_cn <- dist(sc_cn); hc_cn <- hclust(d_cn, "ward.D2")
+sc_nb <- scores(hq.spca.nb); d_nb <- dist(sc_nb); hc_nb <- hclust(d_nb, "ward.D2")
+
+# La red manual queda como referencia de la interpretación
+sc <- sc_nb; d_sc <- d_nb; hc <- hc_nb
+
+# Alturas de las últimas fusiones, con cada red
+rbind(Delaunay = round(rev(hc_cn$height)[1:6], 2),
+      Manual   = round(rev(hc_nb$height)[1:6], 2))
+
+# Silueta media para k = 2..6, con cada red
+sil <- function(h, d) sapply(2:6, function(k)
+  round(mean(silhouette(cutree(h, k), d)[, 3]), 3))
+sil_tab <- rbind(Delaunay = sil(hc_cn, d_cn), Manual = sil(hc_nb, d_nb))
+colnames(sil_tab) <- paste0("k=", 2:6)
+sil_tab
+
+par(mfrow = c(1, 2))
+plot(hc_cn, labels = rownames(sc_cn), cex = 0.45, hang = -1,
+     main = "Ward sobre scores sPCA - Delaunay", xlab = "", sub = "")
+rect.hclust(hc_cn, k = 5, border = "red")
+plot(hc_nb, labels = rownames(sc_nb), cex = 0.45, hang = -1,
+     main = "Ward sobre scores sPCA - Manual", xlab = "", sub = "")
+rect.hclust(hc_nb, k = 5, border = "red")
+```
+
+**Cuántos grupos.** Con la red manual las alturas de fusión caen de `r round(rev(hc_nb$height)[1], 2)` a `r round(rev(hc_nb$height)[2], 2)` y `r round(rev(hc_nb$height)[3], 2)`, y a partir de ahí el descenso es plano (`r round(rev(hc_nb$height)[4], 2)`, `r round(rev(hc_nb$height)[5], 2)`, `r round(rev(hc_nb$height)[6], 2)`): el único salto neto está en la tercera fusión y ninguna altura impone por sí sola un corte.
+
+La silueta media da una respuesta clara y **no** apunta a cinco grupos: es máxima en $k = 4$ con las dos redes (`r sil_tab["Manual", "k=4"]` en la manual, `r sil_tab["Delaunay", "k=4"]` en Delaunay), con $k = 3$ muy cerca, y desciende en $k = 5$ (`r sil_tab["Manual", "k=5"]` y `r sil_tab["Delaunay", "k=5"]`). Conviene decirlo sin rodeos: **el óptimo por silueta es $k = 4$**.
+
+Aun así se adopta **$k = 5$**, por una razón sustantiva y no estadística: el quinto corte desprende un grupo sin firma química propia (todas sus medias cerca de cero) del conjunto silíceo-bicarbonatado, y dejar aislado ese residuo hace más limpia la lectura de las cuatro facies restantes. El coste en calidad de partición es moderado y queda registrado en `sil_tab`; un lector que prefiera atenerse al criterio de silueta puede releer toda la sección con $k = 4$ sin que cambien las conclusiones sobre los ejes.
+
+El mismo corte se aplica a la partición construida sobre la red de Delaunay: fijar $k$ en ambas es lo que hace comparables las dos clasificaciones. La tabla `sil_tab` permite verificar si la red altera la calidad de la partición o solo su composición —aquí el perfil es prácticamente el mismo y Delaunay queda incluso algo por encima en todos los $k$.
+
+```{r}
+#| label: hclust-grupos
+grp_cn <- cutree(hc_cn, k = 5)   # red de Delaunay
+grp    <- cutree(hc_nb, k = 5)   # red manual (referencia)
+
+rbind(Delaunay = as.vector(table(grp_cn)), Manual = as.vector(table(grp)))
+
+# Correspondencia entre ambas particiones: tabla cruzada e índice de Rand ajustado
+table(Delaunay = grp_cn, Manual = grp)
+
+ari <- function(a, b) {
+  tb  <- table(a, b); n <- sum(tb)
+  s   <- sum(choose(tb, 2))
+  sa  <- sum(choose(rowSums(tb), 2)); sb <- sum(choose(colSums(tb), 2))
+  esp <- sa * sb / choose(n, 2)
+  (s - esp) / ((sa + sb) / 2 - esp)
+}
+round(ari(grp_cn, grp), 3)
+
+# Composición media de cada grupo con la red manual, en unidades estandarizadas
+round(aggregate(hq.spca.nb$tab, list(grupo = grp), mean)[, -1], 2)
+
+# Centroide de cada grupo en el plano factorial (componentes 1 y 2)
+round(aggregate(sc, list(grupo = grp), mean), 2)
+```
+
+Las etiquetas de grupo son arbitrarias en cada partición —el 3 de una no tiene por qué ser el 3 de la otra—, así que la tabla cruzada es la que indica la correspondencia real. El índice de Rand ajustado la resume en un número: 1 significa particiones idénticas y 0, coincidencia atribuible al azar. Aquí vale `r round(ari(grp_cn, grp), 3)`.
+
+La caracterización de facies que sigue corresponde a la partición sobre la red manual.
+
+| Grupo | n | C1 | C2 | Composición media (unidades estandarizadas de la matriz CLR) | Facies |
+|---|---|---|---|---|---|
+| 1 | 18 | -2.25 | -0.67 | Na (1.17), T (1.11) y Cl (1.08) altos, con pH (0.37) sobre la media; SO₄ (-0.95) y Ca (-0.90) los más bajos | **termal sódico-clorurada**, empobrecida en Ca-SO₄ |
+| 2 | 7 | 1.03 | -2.47 | Mn (1.31) el más alto del conjunto, con SO₄ (0.66) y Mg (0.48); HCO₃ (-1.78), Si (-1.35) y As (-0.77) los más bajos, con pH (-0.54) | **sulfatada manganesífera**, sin bicarbonato ni sílice |
+| 3 | 14 | 1.85 | -0.27 | SO₄ (0.97), Ca (0.94) y Mg (0.82) altos; Na (-0.72), Si (-0.69), Cl (-0.63) y T (-0.50) bajos | **cálcico-magnésico-sulfatada fría**, sin componente salino |
+| 4 | 13 | 0.43 | 2.18 | Si (1.15), As (0.92), HCO₃ (0.49) y K (0.48) altos; Mg (-1.00), T (-0.84), Cl (-0.72) y Na (-0.68) bajos | **silícea-bicarbonatada con As**, fría |
+| 5 | 8 | 0.24 | 0.60 | ninguna variable se aparta de la media: el máximo es As (0.32) y el mínimo Na (-0.44) | **sin firma diferenciada** (residuo del cuarto grupo) |
+
+::: {.callout-note}
+## Con CLR no existe el grupo «diluido»
+
+Las medias de la tabla se leen sobre la matriz que el sPCA centró y escaló, cuyo bloque de concentraciones es CLR. Como las filas del CLR suman cero, **ningún grupo puede tener todas sus concentraciones por debajo de la media**: lo que separa a los grupos son contrastes entre iones, no el nivel absoluto de mineralización. Un grupo «de aguas muy diluidas» sería, en este marco, un artefacto de lectura. El grupo 5 no es el diluido: es el que carece de contraste dominante.
+:::
+
+La partición reproduce la interpretación de los ejes. El grupo 1 ocupa el extremo negativo del componente 1 (centroide -2.25: la firma termal sódico-clorurada) y el grupo 3 el extremo opuesto (1.85: cálcico-magnésico-sulfatada); los grupos 2 y 4 se sitúan en los dos polos del componente 2 (-2.47 y 2.18), es decir, el contraste manganesífero-sin-bicarbonato frente al silíceo-bicarbonatado. El grupo 5 queda cerca del origen en ambos ejes, coherente con su falta de firma.
+
+El quinto corte es el que separa los grupos 4 y 5, que en $k = 4$ formaban una sola clase de 21 puntos (`table(cutree(hc_nb, 4), grp)` lo confirma: los demás grupos no se tocan). La distinción es la que ya se comentó al elegir $k$: aísla el residuo sin firma y deja el grupo 4 como una facies silíceo-bicarbonatada nítida, la única con As elevado.
+
+```{r}
+#| label: hclust-mapa
+#| fig-cap: "Grupos jerárquicos con cada red: plano factorial (arriba) y distribución espacial sobre la red correspondiente (abajo). Los colores son independientes entre columnas."
+#| fig-width: 11
+#| fig-height: 10
+cols <- c("#D95F02", "#1B9E77", "#7570B3", "#E7298A","#1900ff")
+
+par(mfrow = c(2, 2))
+s.class(as.data.frame(sc_cn), factor(grp_cn), col = cols,
+        sub = "Plano factorial sPCA - Delaunay", possub = "bottomright")
+s.class(as.data.frame(sc_nb), factor(grp), col = cols,
+        sub = "Plano factorial sPCA - Manual", possub = "bottomright")
+
+plot(cn, xy, col = "grey80", lwd = 1)
+points(xy, pch = 21, bg = cols[grp_cn], cex = 1.3)
+title("Grupos sobre la red de Delaunay")
+
+plot(nb, xy, col = "grey80", lwd = 1)
+points(xy, pch = 21, bg = cols[grp], cex = 1.3)
+title("Grupos sobre la red manual")
+legend("topleft", legend = paste("Grupo", sort(unique(grp))), pt.bg = cols,
+       pch = 21, bty = "n", cex = 0.8)
+```
+
+Los dos mapas se leen buscando lo mismo: si los puntos de un color forman bloques contiguos o se dispersan. Como las etiquetas —y por tanto los colores— no son comparables entre columnas, el contraste debe hacerse sobre la geometría de los parches, no sobre el color.
+
+### ¿Los grupos son espacialmente coherentes?
+
+La pregunta relevante no es si los grupos existen —Ward siempre devuelve grupos— sino si respetan la red de vecindad. Se mide la proporción de enlaces que unen puntos del mismo grupo y se compara con la distribución obtenida al permutar las etiquetas:
+
+```{r}
+#| label: coherencia
+coherencia <- function(g, lw) {
+  vec <- lw$neighbours
+  mean(unlist(lapply(seq_along(vec), function(i) {
+    j <- vec[[i]]; if (identical(j, 0L)) NULL else g[j] == g[i]
+  })))
+}
+
+# Misma clasificación, pero sobre los scores del ACP clásico
+grp_acp <- cutree(hclust(dist(pca_conv$li[, 1:2]), "ward.D2"), k = 5)
+
+prueba <- function(g, lw, red) {
+  obs  <- coherencia(g, lw)
+  nulo <- replicate(999, coherencia(sample(g), lw))
+  data.frame(red         = red,
+             observado   = round(obs, 3),
+             esperado    = round(mean(nulo), 3),
+             p_valor     = round((sum(nulo >= obs) + 1) / 1000, 4),
+             ACP_clasico = round(coherencia(grp_acp, lw), 3))
+}
+
+set.seed(11)
+coh <- rbind(prueba(grp_cn, hq.spca.cn$lw, "Delaunay"),
+             prueba(grp,    hq.spca.nb$lw, "Manual"))
+rownames(coh) <- coh$red
+coh
+```
+
+Cada fila evalúa su propia partición sobre su propia red; la última columna repite la medida para la clasificación derivada del ACP clásico bajo esos mismos pesos, de modo que dentro de cada fila la comparación sPCA / ACP es directa.
+
+Con la red manual, el `r round(100 * coh["Manual", "observado"], 1)` % de los enlaces de vecindad unen puntos del mismo grupo, frente al `r round(100 * coh["Manual", "esperado"], 1)` % esperado si las etiquetas se repartieran al azar ($p$ = `r coh["Manual", "p_valor"]`). Con la red de Delaunay la cifra es `r round(100 * coh["Delaunay", "observado"], 1)` % frente a `r round(100 * coh["Delaunay", "esperado"], 1)` % ($p$ = `r coh["Delaunay", "p_valor"]`). Los grupos no son un artificio del algoritmo con ninguna de las dos redes: respetan la vecindad muy por encima de lo atribuible al azar.
+
+La comparación entre filas hay que leerla con cuidado. La red manual tiene menos enlaces —los cortes en las fallas eliminan precisamente los que cruzan discontinuidades— y una red más rala tiende a producir proporciones intragrupo más altas por construcción. Por eso el contraste informativo es el de cada fila contra su propio nulo, no el de una fila contra la otra.
+
+::: {.callout-warning}
+## La ventaja sobre el ACP clásico depende de la red
+
+Con $k = 5$ y bajo los pesos de la **red manual**, la clasificación del sPCA reúne el `r round(100 * coh["Manual", "observado"], 1)` % de los enlaces dentro de un mismo grupo frente al `r round(100 * coh["Manual", "ACP_clasico"], 1)` % de la clasificación construida sobre el ACP clásico: una ventaja apreciable. Bajo los pesos de **Delaunay**, en cambio, las dos quedan casi empatadas (`r round(100 * coh["Delaunay", "observado"], 1)` % frente a `r round(100 * coh["Delaunay", "ACP_clasico"], 1)` %).
+
+Esa asimetría es informativa, pero no debe sobreinterpretarse. Los scores del sPCA se optimizaron para maximizar la autocorrelación **bajo su propia red**, así que la comparación de la fila «Manual» le es favorable por construcción; el resultado de Delaunay, donde esa ventaja se diluye, sugiere que buena parte de la contigüidad espacial de las facies procede de la estructura de los datos y no del método de ordenación.
+
+La conclusión defendible es intermedia: el sPCA produce una clasificación algo más contigua cuando la vecindad se define con las fallas, y prácticamente indistinguible del ACP cuando se define solo por geometría euclidiana. Su aporte más sólido en este trabajo sigue estando en haber **identificado y validado** la estructura espacial —los tests de permutación sobre los ejes—, no en la clasificación.
+:::
+
+## Conclusiones
+
+**Dos componentes significativos, ambos globales, con las dos redes.** El sPCA con la red manual retiene dos autovalores positivos por encima del resto ($\lambda_1$ = `r round(hq.spca.nb$eig[1], 3)` y $\lambda_2$ = `r round(hq.spca.nb$eig[2], 3)`, frente a $\lambda_3$ = `r round(hq.spca.nb$eig[3], 3)`), y el `screeplot` confirma que ambos combinan varianza alta con $I$ de Moran alto: no son autovalores inflados por varianza sin estructura, ni por estructura sin señal. La red de Delaunay devuelve la misma lectura con autovalores menores ($\lambda_1$ = `r round(hq.spca.cn$eig[1], 3)` y $\lambda_2$ = `r round(hq.spca.cn$eig[2], 3)`): **la dimensionalidad que se retiene no depende de la red**, solo su nitidez. Conviene matizar que la separación frente a $\lambda_3$ es gradual, así que la decisión de quedarse con dos ejes se apoya sobre todo en los tests de permutación.
+
+**La autocorrelación espacial es significativa con ambas redes.** El `global.rtest` es significativo tanto con Delaunay (obs = `r round(myGtest.cn$obs, 3)`; esperado = `r round(myGtest.cn$expvar[['Expectation']], 3)`; $p$ = `r format(myGtest.cn$pvalue, scientific = FALSE)`) como con la red manual (obs = `r round(myGtest.nb$obs, 3)`; esperado = `r round(myGtest.nb$expvar[['Expectation']], 3)`; $p$ = `r format(myGtest.nb$pvalue, scientific = FALSE)`), lo que confirma que existe autocorrelación espacial positiva en el conjunto de variables, y es esa señal la que los dos componentes positivos resumen. Que el resultado se sostenga con una red construida sin ningún criterio geológico descarta que la estructura sea un artefacto de haber impuesto las fallas. La composición hidrogeoquímica de un punto de muestreo se parece a la de sus vecinos dentro del mismo bloque delimitado por fallas.
+
+**Se desestima la autocorrelación negativa.** El `local.rtest` no es significativo con ninguna de las dos redes (Delaunay: $p$ = `r format(myLtest.cn$pvalue, scientific = FALSE)`; manual: $p$ = `r format(myLtest.nb$pvalue, scientific = FALSE)`) y el estadístico observado queda en ambos casos incluso por debajo del valor esperado bajo aleatoriedad. Los autovalores negativos (`r round(rev(hq.spca.nb$eig)[1], 3)`, `r round(rev(hq.spca.nb$eig)[2], 3)`) son marginales frente a los positivos y quedan pegados al origen en el eje de varianza del `screeplot`. No hay evidencia de estructuras locales tipo damero —contrastes abruptos entre puntos vecinos— por lo que esos ejes no se interpretan.
+
+**Qué representa cada componente significativo.**
+
+Las cargas se citan con el signo alineado al sPCA manual, tal como aparecen en la tabla de la sección «Qué variables de X constituyen cada componente». Como el bloque de concentraciones está en CLR, **ningún componente puede leerse como un gradiente de mineralización total**: el CLR elimina por construcción el efecto de dilución, así que los dos ejes son contrastes entre iones.
+
+- **Componente 1 — contraste termal sódico-clorurado frente a cálcico-sulfatado.** No es un eje de un solo signo: opone T (`r round(cargas["T", "Man 1"], 2)`), Na (`r round(cargas["Na", "Man 1"], 2)`) y Cl (`r round(cargas["Cl", "Man 1"], 2)`) contra Ca (`r round(cargas["Ca", "Man 1"], 2)`) y SO₄ (`r round(cargas["SO4", "Man 1"], 2)`). Esas cinco variables reúnen el `r resumen_cargas[5, "% del eje"]` % de la norma del eje y son **las mismas** en el ACP clásico y en los dos sPCA.
+
+::: {.callout-important}
+Hipotesis: separa un extremo de circulación profunda o termal, con firma sódico-clorurada, de aguas dominadas por la interacción con carbonatos y sulfatos. Su expresión espacial es regional.
+:::
+
+- **Componente 2 — contraste silíceo-bicarbonatado frente a magnésico-termal.** Opone Si (`r round(cargas["Si", "Man 2"], 2)`) y HCO₃ (`r round(cargas["HCO3", "Man 2"], 2)`) contra Mg (`r round(cargas["Mg", "Man 2"], 2)`), T (`r round(cargas["T", "Man 2"], 2)`), Na (`r round(cargas["Na", "Man 2"], 2)`) y Cl (`r round(cargas["Cl", "Man 2"], 2)`), con Mn (`r round(cargas["Mn", "Man 2"], 2)`) en el mismo lado que el Mg.
+
+::: {.callout-important}
+Hipotesis: Discrimina aguas de interacción silicatada con equilibrio carbonatado activo frente a aguas con aporte de Mg-Mn y componente salino-termal. Requiere especial atención del equipo químico (DP, DM, WH).
+:::
+
+**El aporte del espacio es desigual entre los dos ejes, y es cuantificable.** Descomponiendo cada eje en $\mathrm{var} \times I$ bajo los pesos de la red manual, el primer componente del sPCA es casi indistinguible del primero del ACP clásico ($|r|$ = `r round(abs(cor(pca_conv$li[, 1], hq.spca.nb$li[, 1])), 2)`; `r g1("Manual")["I_pct"]` % de $I$ a cambio de un `r abs(g1("Manual")["var_pct"])` % de varianza, con un saldo de `r g1("Manual")["C_pct"]` % en $C$): la estructura de máxima varianza ya era, casi exactamente, la de máxima organización espacial. El segundo, en cambio, cede un `r abs(ganancias["Manual", "var_pct"])` % de varianza para ganar un `r ganancias["Manual", "I_pct"]` % de autocorrelación (`r round(res$I[res$red=="Manual" & res$eje=="ACP2"], 3)` → `r round(res$I[res$red=="Manual" & res$eje=="sPCA2"], 3)`), y queda con un $I$ comparable al del primer eje. El intercambio que define al método solo resulta rentable en el segundo eje, y allí es sustancial.
+
+**El segundo componente es donde el sPCA aporta algo nuevo, y el cambio es una sustitución identificable.** Comparadas con el signo ya alineado, las variables que más cambian de peso al pasar del ACP al sPCA manual son HCO₃ (`r round(comp["HCO3", "dif_Manual"], 2)`), Ca (`r round(comp["Ca", "dif_Manual"], 2)`), pH (`r round(comp["pH", "dif_Manual"], 2)`) y As (`r round(comp["As", "dif_Manual"], 2)`). Los tres análisis construyen este eje sobre Si y Mg, pero el tercer elemento constitutivo cambia de manos: el ACP clásico lo apoya en **As** (carga `r round(cargas["As", "ACP 2"], 2)`), mientras que ambos sPCA lo sustituyen por **HCO₃**, que pasa de `r round(cargas["HCO3", "ACP 2"], 2)` a `r round(cargas["HCO3", "Man 2"], 2)`. El cambio no es cosmético: el equilibrio carbonatado tiene una organización geográfica coherente con las barreras de falla, mientras que el As —ligado a fuentes puntuales— varía sin patrón espacial claro. Este tipo de resultado es lo que el método busca resaltar, al visibilizar patrones *espaciales crípticos*: incorporar la estructura espacial al criterio de optimización cambia qué variables definen el componente y revela una estructura que el ACP clásico repartía entre dos ejes.
+
+**La clasificación jerárquica traduce los componentes en facies.** El corte en cinco grupos sobre los scores de los dos componentes significativos separa una facies termal sódico-clorurada (n = `r sum(grp == 1)`), una sulfatada manganesífera sin bicarbonato ni sílice (n = `r sum(grp == 2)`), una cálcico-magnésico-sulfatada fría sin componente salino (n = `r sum(grp == 3)`), una silícea-bicarbonatada con As elevado (n = `r sum(grp == 4)`) y un residuo sin firma diferenciada (n = `r sum(grp == 5)`). Hay que registrar que el criterio de silueta favorece $k = 4$ y que $k = 5$ se adopta por interpretabilidad. Los grupos son espacialmente contiguos —`r round(100 * coh["Manual", "observado"], 1)` % de enlaces intragrupo frente al `r round(100 * coh["Manual", "esperado"], 1)` % esperado por azar, $p$ = `r coh["Manual", "p_valor"]`— y superan a la clasificación equivalente sobre el ACP clásico (`r round(100 * coh["Manual", "ACP_clasico"], 1)` %), aunque esa ventaja se diluye bajo los pesos de Delaunay (`r round(100 * coh["Delaunay", "observado"], 1)` % frente a `r round(100 * coh["Delaunay", "ACP_clasico"], 1)` %). La partición construida sobre la red de Delaunay se compara con la anterior mediante el índice de Rand ajustado (`r round(ari(grp_cn, grp), 2)`), que indica en qué medida las facies dependen de la red elegida; el cuadro de cargas acota lo que ese índice puede significar, porque las dos redes agrupan sobre las **mismas** variables constitutivas.
+
+**Sobre la red de conexión: qué cambia y qué no.** El análisis se llevó completo con las dos redes, y esa es la única forma de separar lo que aportan las fallas de lo que ya estaba en los datos.
+
+*Lo que cambia.* Los tres autovalores comparados mejoran al pasar de la red de Delaunay a la red editada con las fallas como barreras (`r round(hq.spca.cn$eig[1], 3)` → `r round(hq.spca.nb$eig[1], 3)`; `r round(hq.spca.cn$eig[2], 3)` → `r round(hq.spca.nb$eig[2], 3)`; `r round(rev(hq.spca.cn$eig)[1], 3)` → `r round(rev(hq.spca.nb$eig)[1], 3)`), y la ganancia de autocorrelación del segundo eje sobre el ACP clásico se lee en la tabla `ganancias` (`r ganancias["Manual", "I_pct"]` % con la red manual frente a `r ganancias["Delaunay", "I_pct"]` % con Delaunay). La red que incorpora las discontinuidades geológicas separa mejor la señal espacial de la que no la tiene.
+
+*Lo que no cambia.* La significancia de la estructura global, el rechazo de la estructura local, la dimensionalidad retenida y la identidad del primer componente son las mismas con las dos definiciones de vecindad. El cuadro de cargas lo hace explícito: los dos sPCA seleccionan exactamente las mismas variables constitutivas en los dos componentes, y solo difieren en los pesos secundarios. Estos resultados no dependen de la hipótesis hidrogeológica: se obtienen igual con una red que solo conoce distancias euclidianas.
+
+Es un indicio a favor de la hipótesis hidrogeológica de partida, pero conviene leerlo con cautela por tres razones: la red manual se construyó con conocimiento del área —lo que la hace, por diseño, favorable a sí misma—; parte de un grafo base distinto (Gabriel, más ralo que Delaunay), de modo que la diferencia entre ambas no se debe solo a las fallas; y es aún posible que una red con más criterios de ajuste produzca autovalores mayores. La conclusión defendible es que **la estructura espacial resiste ambas definiciones de vecindad, y que las fallas la hacen más nítida sin crearla**. En cualquier caso, la existencia de autocorrelación espacial es estadísticamente verificable y suficientemente fuerte como para involucrarse en la interpretación de los resultados obtenidos.
+
+## Nota final: qué tipo de aporte hace el sPCA aquí
+
+Los resultados de este trabajo no difieren radicalmente de los que habría dado un ACP clásico, y conviene decir por qué eso no invalida el ejercicio. El aporte del método se reparte en tres planos que no deben confundirse:
+
+- **Como ordenación**, aporta poco en el primer eje y de forma sustancial en el segundo. Cuando la varianza dominante ya está organizada en el espacio —el caso del contraste termal sódico-clorurado frente a cálcico-sulfatado— el sPCA converge al ACP porque no hay nada que rescatar: las cinco variables constitutivas del primer componente son idénticas en los tres análisis. Su ventaja aparece en ejes de varianza intermedia, donde una señal espacialmente coherente compite con otra que no lo es: allí sustituyó el As por el HCO₃ y concentró en un solo componente la firma silíceo-bicarbonatada que el ACP repartía entre dos.
+- **Como inferencia**, aporta lo que un ACP no puede dar en absoluto. Los tests por permutación permiten afirmar que la autocorrelación positiva es real y descartar formalmente las estructuras locales, y lo hacen con las dos redes ensayadas (global: $p$ = `r format(myGtest.cn$pvalue, scientific = FALSE)` y `r format(myGtest.nb$pvalue, scientific = FALSE)`; local: $p$ = `r format(myLtest.cn$pvalue, scientific = FALSE)` y `r format(myLtest.nb$pvalue, scientific = FALSE)`). Sin ellos, cualquier lectura espacial de un plano factorial sería una impresión visual.
+- **Como clasificación**, aporta poco y de forma condicionada a la red: con la red manual sus grupos son más contiguos que los del ACP clásico (`r round(100 * coh["Manual", "observado"], 1)` % frente a `r round(100 * coh["Manual", "ACP_clasico"], 1)` %), pero bajo los pesos de Delaunay la diferencia casi desaparece, y la comparación le es favorable por construcción.
+- **Como herramienta para contrastar hipótesis sobre la vecindad**, aporta un marco reproducible. Repetir el análisis completo con una red por defecto y con una red que codifica las fallas convierte una presunción hidrogeológica en algo evaluable: se puede decir cuánto mejora cada diagnóstico al imponer las barreras y, sobre todo, qué conclusiones se sostienen sin ellas.
+
+La conclusión práctica es que el valor del sPCA en este conjunto de datos no está en producir coordenadas distintas, sino en **someter a prueba la hipótesis espacial** y, de paso, afinar un componente interpretable. Que un método no reorganice los datos es también un resultado: indica que la estructura hidrogeoquímica dominante ya era espacial, algo que solo puede afirmarse después de haberlo verificado.
+
+La comparación sistemática entre la red de Delaunay y la red editada cumple aquí la misma función a otro nivel: distingue los resultados que son propiedad de los datos de los que son propiedad de la red que se eligió para mirarlos.
+
+
+# Exploración espacial de clusters
+
+Las figuras anteriores son estáticas y usan coordenadas proyectadas en kilómetros,
+lo que basta para juzgar la contigüidad de los grupos pero no permite confrontarlos
+con la cartografía geológica. Esta sección cierra el documento con un mapa
+interactivo que superpone las tres particiones sobre las **unidades geológicas** y
+las **fallas**, con un control que permite prender y apagar cada capa.
+
+Todo lo que hasta aquí vivía como matrices (`xy`, `nb`, `cn`, `grp`) se convierte
+primero en objetos `sf`; el mapa se arma después sobre esos objetos.
+
+## De matrices y redes a objetos `sf`
+
+Tres conversiones distintas:
+
+- **Los puntos** salen de `dat`, no de `xy`, para arrastrar el `cod_sgc` y las tres
+  etiquetas de cluster en el mismo orden de filas. Las coordenadas están en
+  kilómetros (EPSG:9377); se multiplican por 1000 antes de declarar el CRS y se
+  reproyectan a EPSG:4326, que es lo que espera Leaflet.
+- **Las redes** son objetos `nb`: listas donde el elemento $i$ contiene los índices
+  de los vecinos de $i$. Cada arco aparece dos veces (en `nb[[i]]` y en `nb[[j]]`),
+  así que se conserva solo `j > i` para no duplicar geometrías. El punto aislado
+  (`MN-24-TOC`, con `card == 0`) simplemente no genera ningún arco.
+- **Las capas geológicas** vienen en EPSG:4686 (MAGNA-SIRGAS geográficas); se
+  reproyectan a 4326 y se recortan al área de estudio con un margen de 5 km.
+
+```{r}
+#| label: mapa-sf
+library(leaflet)
+library(xml2)
+
+# --- Puntos: un sf con las tres particiones -----------------------------
+pts_sf <- st_as_sf(
+  data.frame(cod_sgc  = dat$cod_sgc,
+             manual   = grp,          # sPCA red manual (referencia)
+             delaunay = grp_cn,       # sPCA red de Delaunay
+             acp      = grp_acp,      # ACP clásico
+             C1 = round(sc_nb[, 1], 2),
+             C2 = round(sc_nb[, 2], 2),
+             tipo = as.character(dat$`Tipo de punto`),
+             x = dat$X * 1000, y = dat$Y * 1000),   # km -> m
+  coords = c("x", "y"), crs = 9377) |>
+  st_transform(4326)
+
+# --- Redes: de objeto nb a LINESTRING, un feature por arco --------------
+nb_a_lineas <- function(vec, xy_m, ids, crs_in = 9377) {
+  ar <- do.call(rbind, lapply(seq_along(vec), function(i) {
+    j <- vec[[i]]
+    if (identical(j, 0L)) return(NULL)      # punto sin vecinos
+    j <- j[j > i]                            # el arco j-i ya se contó
+    if (!length(j)) return(NULL)
+    cbind(i, j)
+  }))
+  g <- st_sfc(lapply(seq_len(nrow(ar)),
+                     function(k) st_linestring(xy_m[ar[k, ], , drop = FALSE])),
+              crs = crs_in)
+  st_transform(st_sf(origen = ids[ar[, 1]], destino = ids[ar[, 2]], geometry = g),
+               4326)
+}
+
+xy_m      <- as.matrix(dat[, c("X", "Y")]) * 1000
+red_cn_sf <- nb_a_lineas(cn$neighbours, xy_m, dat$cod_sgc)
+red_nb_sf <- nb_a_lineas(nb,            xy_m, dat$cod_sgc)
+
+c(puntos = nrow(pts_sf),
+  arcos_delaunay = nrow(red_cn_sf),   # = sum(card(cn$neighbours)) / 2
+  arcos_manual   = nrow(red_nb_sf))
+```
+
+## Los colores de las unidades geológicas salen del `.qml`
+
+El estilo de QGIS (`data/style_ug.qml`) es un `RuleRenderer`: cada regla asocia un
+valor del campo `N°CartaColores` con un símbolo, y cada símbolo lleva su relleno en
+formato `R,G,B,A,...`. En lugar de transcribir los 18 colores a mano —que volvería
+a desfasarse en cuanto alguien edite el estilo— se leen del XML.
+
+```{r}
+#| label: mapa-qml
+qml  <- read_xml("data/style_ug.qml")
+reg  <- xml_find_all(qml, ".//renderer-v2/rules//rule[@symbol]")
+simb <- xml_find_all(qml, ".//renderer-v2/symbols/symbol")
+
+a_hex <- function(x) {          # "191,245,228,255,rgb:..." -> "#BFF5E4"
+  v <- as.integer(strsplit(x, ",")[[1]][1:3])
+  rgb(v[1], v[2], v[3], maxColorValue = 255)
+}
+
+col_sym <- setNames(
+  vapply(simb, function(s) {
+    a_hex(xml_attr(xml_find_first(
+      s, ".//layer[@class='SimpleFill']//Option[@name='color']"), "value"))
+  }, character(1)),
+  xml_attr(simb, "name"))
+
+etiqueta <- xml_attr(reg, "label")
+simbolo  <- xml_attr(reg, "symbol")
+es_codigo <- grepl("^[0-9]{4}$", etiqueta)          # la regla restante es el "resto"
+
+paleta_ug   <- setNames(unname(col_sym[simbolo[es_codigo]]), etiqueta[es_codigo])
+col_defecto <- unname(col_sym[simbolo[!es_codigo]][1])
+
+length(paleta_ug)
+head(paleta_ug, 6)
+col_defecto
+```
+
+```{r}
+#| label: mapa-capas
+# Área de interés: envolvente de los puntos con 5 km de margen
+area <- st_as_sfc(st_bbox(st_buffer(st_transform(pts_sf, 9377), 5000))) |>
+  st_transform(4326)
+
+# st_simplify a 20 m sobre coordenadas métricas: reduce el peso del HTML sin
+# que el cambio sea perceptible a la escala del mapa.
+ug_sf <- st_read("data/ug.geojson", quiet = TRUE) |>
+  st_transform(9377) |> st_make_valid() |> st_simplify(dTolerance = 20) |>
+  st_transform(4326) |> st_filter(area, .predicate = st_intersects)
+
+sin_regla <- is.na(ug_sf$N.CartaColores) | !(ug_sf$N.CartaColores %in% names(paleta_ug))
+ug_sf$color <- ifelse(sin_regla, col_defecto, paleta_ug[ug_sf$N.CartaColores])
+
+fallas_sf <- st_read("data/fallas.geojson", quiet = TRUE) |>
+  st_transform(4326) |> st_filter(area, .predicate = st_intersects)
+
+c(unidades = nrow(ug_sf), sin_regla_en_qml = sum(sin_regla), fallas = nrow(fallas_sf))
+sort(unique(ug_sf$N.CartaColores[sin_regla]))
+```
+
+::: {.callout-note}
+## Códigos sin regla en el estilo
+
+`sf` lee el campo `N°CartaColores` como `N.CartaColores` (`make.names` sustituye el
+carácter `°`). Seis códigos presentes en `ug.geojson` no tienen regla en el `.qml`
+y caen al color de «todos los demás valores» (`r col_defecto`), que es exactamente
+lo que hace QGIS. Si esas unidades importan para la interpretación, hay que añadir
+las reglas en el estilo, no parchear el color aquí.
+:::
+
+## El mapa
+
+El control de capas separa dos cosas: el **mapa base** (excluyentes entre sí) y las
+**superposiciones** (independientes). Las tres particiones se cargan como capas
+distintas y arrancan con solo la del sPCA manual encendida, porque las tres dibujan
+los mismos 60 puntos y superpuestas se tapan entre ellas.
+
+```{r}
+#| label: mapa-leaflet
+#| fig-cap: "Clusters (k = 5) de las tres ordenaciones sobre las unidades geológicas y las fallas. El control de la esquina superior derecha prende y apaga cada capa."
+#| out-width: "100%"
+pal_cluster <- colorFactor(cols, levels = 1:5)
+
+capa_cluster <- function(m, columna, grupo) {
+  d <- pts_sf
+  d$g <- d[[columna]]
+  addCircleMarkers(m, data = d, group = grupo,
+    radius = 6, stroke = TRUE, color = "#222222", weight = 1, opacity = 1,
+    fillColor = ~pal_cluster(g), fillOpacity = 0.9,
+    label = ~paste0(cod_sgc, " - grupo ", g),
+    popup = ~paste0("<b>", cod_sgc, "</b><br/>", grupo, ": grupo ", g,
+                    "<br/>C1 = ", C1, " | C2 = ", C2,
+                    "<br/>", tipo))
+}
+
+mapa <- leaflet() |>
+  addProviderTiles("CartoDB.Positron", group = "Claro") |>
+  addProviderTiles("Esri.WorldImagery", group = "Satélite") |>
+  addPolygons(data = ug_sf, group = "Unidades geológicas",
+    fillColor = ~color, fillOpacity = 0.65,
+    color = "#6E6E6E", weight = 0.4,
+    label = ~NombreUG,
+    popup = ~paste0("<b>", NombreUG, "</b><br/>Símbolo: ", SimboloUG,
+                    "<br/>Carta de colores: ", N.CartaColores)) |>
+  addPolylines(data = fallas_sf, group = "Fallas",
+    color = "#B00020", weight = 2, opacity = 0.9,
+    label = ~ifelse(is.na(NombreFalla), "Falla sin nombre", NombreFalla)) |>
+  addPolylines(data = red_cn_sf, group = "Red Delaunay",
+    color = "#7A7A7A", weight = 1, opacity = 0.7) |>
+  addPolylines(data = red_nb_sf, group = "Red manual",
+    color = "#1F4E9C", weight = 2, opacity = 0.85)
+
+mapa <- capa_cluster(mapa, "manual",   "Clusters - sPCA manual")
+mapa <- capa_cluster(mapa, "delaunay", "Clusters - sPCA Delaunay")
+mapa <- capa_cluster(mapa, "acp",      "Clusters - ACP clásico")
+
+mapa |>
+  addScaleBar("bottomleft") |>
+  addLegend("bottomright", colors = cols, labels = paste("Grupo", 1:5),
+            title = "Cluster (k = 5)", opacity = 0.9) |>
+  addLayersControl(
+    baseGroups    = c("Claro", "Satélite"),
+    overlayGroups = c("Unidades geológicas", "Fallas",
+                      "Red Delaunay", "Red manual",
+                      "Clusters - sPCA manual", "Clusters - sPCA Delaunay",
+                      "Clusters - ACP clásico"),
+    options = layersControlOptions(collapsed = FALSE)) |>
+  hideGroup(c("Red Delaunay", "Clusters - sPCA Delaunay", "Clusters - ACP clásico"))
+```
+
+::: {.callout-warning}
+## El color no es comparable entre particiones
+
+Las etiquetas de grupo las asigna `cutree` por orden de fusión, así que el «grupo 3»
+del sPCA manual no tiene por qué corresponder al «grupo 3» del ACP clásico. La
+leyenda vale **dentro** de cada capa. Para comparar dos particiones hay que mirar la
+tabla cruzada y el índice de Rand ajustado de la sección de clasificación
+(`r round(ari(grp_cn, grp), 2)` entre las dos redes), no el color del punto.
+:::
+
+**Qué mirar en el mapa.** Tres lecturas que el plano factorial no permite:
+
+- **Grupos contra fallas.** Prendiendo «Fallas» y «Red manual» a la vez se ve qué
+  arcos sobrevivieron a los cortes y si los bordes entre grupos coinciden con las
+  trazas. Es la comprobación visual de la hipótesis que justificó la red manual.
+- **Grupos contra unidades geológicas.** Un grupo que se apoye sobre una sola
+  unidad sugiere control litológico; uno que atraviese varias, control de flujo.
+- **Las dos redes juntas.** Al encender «Red Delaunay» y «Red manual» a la vez se
+  aprecia el doble origen de la diferencia discutido antes: el grafo base de Gabriel
+  es más ralo (`r nrow(red_nb_sf)` arcos frente a `r nrow(red_cn_sf)`) *y* además
+  se le aplicaron cortes.

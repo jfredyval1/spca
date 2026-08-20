@@ -1,0 +1,1145 @@
+---
+title: "Análisis de Componentes Principales espacial (sPCA)"
+subtitle: "Tutorial comentado en español, basado en Jombart (2008) y la viñeta de *adegenet* 2.1.6"
+author: "Adaptación al español del tutorial de Thibaut Jombart"
+date: today
+lang: es
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    fig-width: 7
+    fig-height: 6
+    fig-align: center
+    embed-resources: true
+    code-overflow: wrap
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+
+## Qué es el sPCA y por qué usarlo
+
+El **análisis de componentes principales espacial** (sPCA, *spatial Principal
+Component Analysis*) es un método multivariado diseñado para encontrar
+**patrones espaciales** en datos multivariados —en su origen, datos genéticos—
+cuando el ACP clásico no los detecta.
+
+La idea de fondo es simple: un ACP ordinario busca combinaciones lineales de las
+variables que maximizan la **varianza**, sin saber nada del espacio. Si la
+estructura dominante de los datos son unos pocos individuos atípicos, el ACP se
+quedará con ellos y el patrón geográfico —que puede ser real pero de baja
+varianza— quedará escondido en ejes posteriores. El sPCA corrige esto
+introduciendo explícitamente la información espacial en el criterio a optimizar.
+
+### Los dos ingredientes: matriz de datos y matriz de pesos espaciales
+
+- **X**: matriz de datos. En genética, frecuencias alélicas relativas, con
+  entidades (genotipos o poblaciones) en filas y alelos en columnas.
+- **L**: matriz de pesos espaciales, con términos positivos que miden la
+  proximidad espacial entre entidades. Se deriva de una **red de conexión**
+  (*connection network*), se estandariza por filas (cada fila suma 1) y su
+  diagonal es cero.
+
+### El índice de Moran
+
+Para una variable centrada $\mathbf{x}$ con $n$ observaciones, la
+autocorrelación espacial se mide con el índice de Moran:
+
+$$ I(\mathbf{x}) = \frac{\mathbf{x}^{T}\mathbf{L}\mathbf{x}}{\mathbf{x}^{T}\mathbf{x}} $$
+
+Interpretación:
+
+- $I$ **muy positivo**: sitios vecinos tienden a parecerse → autocorrelación
+  espacial positiva → **estructuras globales** (clinas, parches grandes,
+  diferenciación entre regiones).
+- $I$ **muy negativo**: sitios vecinos tienden a diferenciarse → autocorrelación
+  espacial negativa → **estructuras locales** (patrón en damero, vecinos
+  genéticamente contrastados; típico de sistemas con evitación de la
+  endogamia).
+
+### El criterio del sPCA
+
+El problema del índice de Moran es que está estandarizado por la varianza: mide
+estructura espacial, pero **no** variabilidad. El sPCA optimiza en cambio:
+
+$$ C(\mathbf{x}) = \mathrm{var}(\mathbf{x})\,I(\mathbf{x}) = \frac{1}{n}\mathbf{x}^{T}\mathbf{L}\mathbf{x} $$
+
+Este criterio es **compuesto**: es un producto de varianza y autocorrelación.
+
+- $C$ **muy positivo** ⇒ mucha varianza *y* estructura global.
+- $C$ **muy negativo** ⇒ mucha varianza *y* estructura local.
+
+El sPCA busca las combinaciones lineales $\mathbf{X}\mathbf{v}$ que descomponen
+$C$ desde su máximo hasta su mínimo. Los autovalores resultantes son por tanto
+**positivos y negativos**: los positivos (a la izquierda del gráfico) indican
+estructuras globales, los negativos (a la derecha) estructuras locales.
+
+::: {.callout-important}
+## La regla de oro de la interpretación
+
+Como $C$ es un **producto**, un autovalor grande puede deberse a mucha varianza
+con poca estructura espacial, o al revés. Por eso **siempre** hay que
+descomponer cada autovalor en sus dos componentes (varianza e $I$ de Moran) y
+compararlos con su rango de variación posible. Una estructura con
+autocorrelación baja difícilmente es un patrón espacial; una estructura con
+varianza baja difícilmente refleja señal real en los datos. La función
+`screeplot()` hace exactamente esta descomposición.
+:::
+
+## Preparación
+
+```{r}
+#| label: instalacion
+#| eval: false
+# Ejecutar una sola vez si falta algún paquete
+install.packages(c("adegenet", "spdep", "ade4", "interp"))
+```
+
+```{r}
+#| label: setup
+library(adegenet)   # spca, genind, colorplot, loadingplot, spectral
+library(spdep)      # redes de vecindad, moran.mc, moran.plot
+library(ade4)       # dudi.pca, s.value, s.label, s.kde2d, mantel.randtest
+set.seed(1)
+```
+
+# Parte 1 — El método sobre datos simulados
+
+## Los datos de ejemplo
+
+Usamos el conjunto simulado `spcaIllus`, que corresponde a la Figura 2A del
+artículo original: 80 individuos georreferenciados, 20 loci, 192 alelos. En
+*adegenet*, la matriz **X** de frecuencias alélicas es exactamente el *slot*
+`@tab` de un objeto `genind` o `genpop`.
+
+```{r}
+#| label: datos-sim
+data(spcaIllus)
+obj <- spcaIllus$dat2A
+obj
+
+# Tabla de alelos, mostrando solo el primer locus
+head(tab(obj[loc = 1]))
+```
+
+Las coordenadas espaciales ya vienen dentro del objeto, en `@other$xy`. Cuando
+están ahí, `spca()` las detecta sola y no pide el argumento `xy`.
+
+```{r}
+#| label: coords
+head(other(obj)$xy)
+```
+
+## La función `spca` y la red de conexión
+
+```{r}
+#| label: metodos-spca
+methods("spca")
+args(spca.genind)
+```
+
+Un punto conceptual importante: **las coordenadas no entran directamente en el
+análisis**. Lo que entra es la matriz de pesos **L**, que se deriva de una red
+de conexión. Hay tres maneras de darle esa información a `spca()`:
+
+1. `matWeight`: una matriz de pesos $n \times n$ (se le pone diagonal 0 y se
+   estandariza por filas).
+2. `cn`: una red de conexión ya construida, de clase `nb` o `listw` (paquete
+   *spdep*).
+3. Solo coordenadas + argumentos de `chooseCN()` (`type`, `d1`, `d2`, `k`, `a`,
+   `dmin`): `spca` llama internamente a `chooseCN()` para construir la red.
+
+`ask=FALSE` y `scannf=FALSE` evitan la interactividad; `type=1` es la
+triangulación de Delaunay.
+
+```{r}
+#| label: red-delaunay
+#| fig-cap: "Red de conexión por triangulación de Delaunay (type = 1)."
+mySpca <- spca(obj, ask = FALSE, type = 1, scannf = FALSE,
+               nfposi = 1, nfnega = 0)
+```
+
+Otras redes posibles —la elección de la red es una **decisión del analista**, no
+un detalle técnico, porque define qué significa "vecino" en el problema
+concreto:
+
+```{r}
+#| label: otras-redes
+#| fig-cap: "Red por distancia: vecinos aquellos separados entre 0 y 2 unidades (type = 5)."
+# Vecindad por distancia geográfica: vecinos si la distancia está entre d1 y d2
+mySpcaDist <- spca(obj, type = 5, d1 = 0, d2 = 2, scannf = FALSE,
+                   nfposi = 1, nfnega = 0)
+```
+
+```{r}
+#| label: red-knn
+# k vecinos más cercanos, construida aparte y pasada por 'cn'
+myCn <- chooseCN(other(obj)$xy, type = 6, k = 10, plot = FALSE)
+myCn
+class(myCn)
+
+mySpca2 <- spca(obj, cn = myCn, scannf = FALSE, nfposi = 1, nfnega = 0)
+```
+
+## Los autovalores: cuántos ejes retener
+
+Usado de forma interactiva (`scannf=TRUE`), `spca` muestra el diagrama de
+barras de los autovalores y pide el número de ejes positivos y negativos a
+retener. De forma no interactiva se usan `nfposi` y `nfnega`.
+
+```{r}
+#| label: barplot-eig
+#| fig-cap: "Autovalores del sPCA. En rojo el autovalor retenido."
+barplot(mySpca$eig, main = "Autovalores del sPCA",
+        col = rep(c("red", "grey"), c(1, 100)))
+```
+
+```{r}
+#| label: barplot-eig-2
+#| fig-cap: "Variante con paleta: los autovalores positivos (rojos) corresponden a estructuras globales; los negativos (azules), a estructuras locales."
+barplot(mySpca$eig, main = "Autovalores del sPCA",
+        col = spectral(length(mySpca$eig)))
+legend("topright", fill = spectral(2),
+       leg = c("Estructuras globales", "Estructuras locales"))
+abline(h = 0, col = "grey")
+```
+
+**Cómo leerlo.** Los autovalores están ordenados de mayor a menor. Los positivos
+(izquierda) son estructuras globales; los negativos (derecha), locales. Las
+estructuras reales deben producir autovalores **extremos** y bien separados del
+resto: se busca una ruptura clara, no una caída suave. Aquí solo el primer
+autovalor destaca netamente, así que este objeto contiene **una sola estructura
+global y ninguna local**.
+
+## Contenido de un objeto `spca`
+
+```{r}
+#| label: objeto-spca
+class(mySpca)
+mySpca
+```
+
+Los componentes clave, con su significado:
+
+| Componente | Contenido | Interpretación |
+|---|---|---|
+| `$eig` | autovalores, orden decreciente | valores de $C$; signo = tipo de estructura |
+| `$c1` | ejes principales ($\mathbf{v}$) | cargas (*loadings*) de cada alelo/variable |
+| `$li` | componentes principales ($\psi = \mathbf{X}\mathbf{v}$) | puntuación ("score") de cada entidad |
+| `$ls` | vector *lagged* de las CP | versión "suavizada" de los scores |
+| `$as` | ejes del ACP proyectados en los del sPCA | correlación entre ambos análisis |
+| `$xy` | coordenadas | — |
+| `$lw` | pesos espaciales (`listw`) | la matriz **L** efectivamente usada |
+
+```{r}
+#| label: componentes
+head(mySpca$eig); tail(mySpca$eig); length(mySpca$eig)
+head(mySpca$c1)   # cargas de los alelos sobre el eje 1
+head(mySpca$li)   # scores de los individuos
+head(mySpca$ls)   # scores retardados (lag)
+```
+
+Los **scores retardados** (`$ls`) son el promedio de los scores de los vecinos
+de cada entidad. Al promediar espacialmente se filtra el ruido individual, de
+modo que **las estructuras globales se ven mucho mejor con `$ls` que con
+`$li`**. Es la representación recomendada para los mapas.
+
+El componente `$as` merece un comentario aparte: como los ejes del ACP
+($\mathbf{u}$) y los del sPCA ($\mathbf{v}$) están centrados y escalados, su
+proyección es simplemente la **correlación** entre ambos. Sirve para saber
+cuánto se parece lo que encontró el sPCA a lo que ya encontraba el ACP clásico.
+
+```{r}
+#| label: as
+mySpca$as
+```
+
+## Descomposición de los autovalores: `screeplot`
+
+Este es el gráfico diagnóstico central del método.
+
+```{r}
+#| label: screeplot
+#| fig-cap: "Descomposición de cada autovalor en varianza (eje x) y autocorrelación espacial I de Moran (eje y)."
+screeplot(mySpca)
+```
+
+**Cómo leerlo.** Cada autovalor $\lambda_i$ se ubica según sus dos componentes.
+El **rectángulo punteado** delimita el rango alcanzable:
+
+- La **línea vertical derecha** es la varianza máxima que puede alcanzar una
+  combinación lineal de las variables, es decir, la del primer eje de un ACP
+  ordinario.
+- Las **dos líneas horizontales** son los valores máximo y mínimo de $I$ de
+  Moran, dados los pesos espaciales usados.
+
+Un autovalor solo merece interpretarse si está **lejos del origen en ambos
+ejes** y bien separado del resto. Aquí $\lambda_1$ es claramente el mayor tanto
+en varianza como en autocorrelación, y se distingue con nitidez de todos los
+demás: **solo la primera estructura global debe interpretarse**.
+
+## Tests de estructura espacial: global y local
+
+Los tests por permutación de Jombart *et al.* (2008) refuerzan la decisión de
+interpretar o no una estructura. Cada uno detecta un tipo:
+
+- `global.rtest`: detecta estructuras **globales** (autocorrelación positiva).
+- `local.rtest`: detecta estructuras **locales** (autocorrelación negativa).
+
+```{r}
+#| label: gtest
+#| fig-cap: "Test global: el estadístico observado (punto negro) queda muy por encima de la distribución nula."
+myGtest <- global.rtest(obj$tab, mySpca$lw, nperm = 99)
+myGtest
+plot(myGtest)
+```
+
+```{r}
+#| label: ltest
+#| fig-cap: "Test local: el estadístico observado cae dentro de la distribución nula."
+myLtest <- local.rtest(obj$tab, mySpca$lw, nperm = 99)
+myLtest
+plot(myLtest)
+```
+
+**Interpretación.** El test global es significativo: se rechaza la hipótesis
+nula de ausencia de estructura espacial global. El test local no lo es, como se
+esperaba a partir de los autovalores.
+
+::: {.callout-note}
+Con 99 permutaciones el *p*-valor no puede bajar de 0.01. Para resultados
+publicables conviene usar 999 o 9999 permutaciones.
+:::
+
+## Representación gráfica de los resultados
+
+### El resumen automático
+
+```{r}
+#| label: plot-spca
+#| fig-width: 9
+#| fig-height: 9
+#| fig-cap: "Resumen gráfico de un objeto spca."
+plot(mySpca)
+```
+
+Los seis paneles, de arriba abajo y de izquierda a derecha:
+
+1. **Red de conexión** usada para definir los pesos espaciales.
+2. **Interpolación local del score** (`s.image`) en niveles de gris con curvas
+   de nivel. Cuanto más juntas están las curvas, **más abrupta es la
+   diferenciación genética** en esa zona.
+3. **Score con cuadrados de tamaño variable** (`s.value`): blanco para valores
+   negativos, negro para positivos, tamaño proporcional al valor absoluto.
+   Cuadrados grandes negros y grandes blancos están bien diferenciados; los
+   pequeños lo están poco.
+4. **Variante en niveles de gris** de lo anterior.
+5. y 6. Los dos gráficos de autovalores ya vistos.
+
+En este ejemplo, las tres representaciones del primer score global coinciden:
+los genotipos se separan en **dos grupos genéticos, uno al oeste y otro al
+este**.
+
+### Mapa por color: `colorplot`
+
+`colorplot` traduce hasta tres scores simultáneamente en los canales rojo, verde
+y azul, componiendo un solo color por individuo. Es la forma más compacta de
+mapear varias estructuras a la vez.
+
+```{r}
+#| label: colorplot-sim
+#| fig-cap: "colorplot del primer score global."
+colorplot(mySpca, cex = 3, main = "colorplot de mySpca: primer score global")
+```
+
+### Interpolación: mapas de clinas
+
+```{r}
+#| label: interp
+#| fig-cap: "Interpolación del primer score (li)."
+library(interp)
+x <- other(obj)$xy[, 1]
+y <- other(obj)$xy[, 2]
+
+temp <- interp(x, y, mySpca$li[, 1])
+image(temp, col = azur(100))
+points(x, y)
+```
+
+::: {.callout-warning}
+La interpolación debe hacerse **después** del análisis, nunca antes. Interpolar
+los datos crudos introduce estructuras espaciales artificiales que el sPCA
+después "encontraría" como si fueran reales.
+:::
+
+Con los scores retardados (`$ls`) y una malla más fina el mapa queda mucho más
+limpio:
+
+```{r}
+#| label: interp-ls
+#| fig-cap: "Interpolación del score retardado (ls) con mayor resolución."
+interpX <- seq(min(x), max(x), le = 200)
+interpY <- seq(min(y), max(y), le = 200)
+temp <- interp(x, y, mySpca$ls[, 1], xo = interpX, yo = interpY)
+image(temp, col = azur(100))
+points(x, y)
+```
+
+```{r}
+#| label: filled-contour
+#| fig-cap: "Mapa interpolado con paleta divergente: rojo y azul marcan los dos acervos genéticos."
+myPal <- colorRampPalette(c("firebrick2", "white", "lightslateblue"))
+annot <- function() {
+  title("sPCA - mapa interpolado de los scores individuales")
+  points(x, y)
+}
+filled.contour(temp, color.pal = myPal, nlev = 50,
+               key.title = title("score\nretardado 1"),
+               plot.title = annot())
+```
+
+### Qué variables generan la estructura: `loadingplot`
+
+La contribución de cada alelo a una estructura es su **carga al cuadrado**.
+
+```{r}
+#| label: loadingplot
+#| fig-cap: "Contribución de cada alelo al primer eje del sPCA."
+myLoadings <- mySpca$c1[, 1]^2
+names(myLoadings) <- rownames(mySpca$c1)
+loadingplot(myLoadings, xlab = "Alelos", ylab = "Peso de los alelos",
+            main = "Contribución de los alelos\nal primer eje del sPCA")
+```
+
+Con `threshold` se anotan solo las contribuciones por encima de un umbral, y con
+`fac` se separan por marcador, para ver si todos los marcadores aportan de forma
+comparable. La función devuelve invisiblemente la información de las variables
+que superan el umbral.
+
+```{r}
+#| label: loadingplot-umbral
+#| fig-cap: "5 % de alelos con mayor contribución, agrupados por marcador."
+temp <- loadingplot(myLoadings, threshold = quantile(myLoadings, 0.95),
+                    xlab = "Alelos", ylab = "Peso de los alelos",
+                    main = "Contribución de los alelos\nal primer eje del sPCA",
+                    fac = obj$loc.fac, cex.fac = 0.6)
+temp
+```
+
+```{r}
+#| label: boxplot-marcadores
+#| fig-cap: "Contribución promedio por marcador."
+boxplot(myLoadings ~ obj$loc.fac, las = 3, ylab = "Contribución",
+        xlab = "Marcador", col = "grey",
+        main = "Contribuciones por marcador\nal primer score global")
+```
+
+# Parte 2 — Caso de estudio: el rebeco en los montes Bauges
+
+## El problema
+
+El rebeco o gamuza (*Rupicapra rupicapra*) es una especie protegida en Francia.
+Los montes Bauges son un área protegida donde se ha estudiado la especie. La
+pregunta de conservación es: **¿los individuos de esta zona forman una única
+unidad reproductiva, o están estructurados en subgrupos?** Y si lo están, ¿qué
+lo causa?
+
+Las observaciones de campo son demasiado escasas para responder, pero los datos
+genéticos sí pueden hacerlo: una desviación de la panmixia debería producir
+estructuración genética. El conjunto `rupica` contiene 335 genotipos
+georreferenciados con 9 marcadores microsatélite.
+
+Este caso es didácticamente valioso porque **el ACP clásico fracasa y el sPCA
+tiene éxito**: es la demostración de por qué existe el método.
+
+## Exploración de los datos
+
+```{r}
+# Limpiar datos anteriores
+rm(list = ls())
+#| label: rupica-datos
+data(rupica)
+rupica
+```
+
+```{r}
+#| label: rupica-mapa
+#| fig-cap: "Distribución espacial del muestreo sobre el relieve de los Bauges."
+rupica$other$showBauges()
+points(rupica$other$xy, col = "red", pch = 20)
+```
+
+La distribución no es aleatoria: parece organizarse en agrupaciones difusas.
+Pero los puntos superpuestos pueden sesgar la evaluación visual, así que se
+añade una estimación de densidad por núcleo en dos dimensiones:
+
+```{r}
+#| label: rupica-kde
+#| fig-cap: "Densidad de muestreo estimada por kernel bidimensional."
+rupica$other$showBauges()
+s.kde2d(rupica$other$xy, add.plot = TRUE)
+points(rupica$other$xy, col = "red", pch = 20)
+```
+
+**Conclusión operativa:** el agrupamiento geográfico no es lo bastante nítido
+para asignar sin ambigüedad cada individuo a un grupo. Por tanto **todos los
+análisis deben hacerse a nivel individual**, lo que descarta la mayoría de las
+herramientas clásicas de genética de poblaciones (que necesitan poblaciones
+predefinidas).
+
+## Diversidad genética: ¿hay déficit de heterocigosidad?
+
+Sin agrupación previa no se pueden usar enfoques basados en $F_{ST}$. Pero la
+estructura genética podría manifestarse como un **déficit de heterocigosidad**.
+
+```{r}
+#| label: heterocigosidad
+#| fig-cap: "Heterocigosidad observada frente a esperada; la línea roja es la identidad."
+rupica.smry <- summary(rupica)
+plot(rupica.smry$Hobs, rupica.smry$Hexp,
+     main = "Heterocigosidad observada vs esperada",
+     xlab = "Hobs", ylab = "Hexp")
+abline(0, 1, col = "red")
+```
+
+```{r}
+#| label: ttest-het
+t.test(rupica.smry$Hexp, rupica.smry$Hobs, paired = TRUE, var.equal = TRUE)
+```
+
+La heterocigosidad observada no se desvía apreciablemente de la esperada
+($p \approx 0.27$). Esta vía **no detecta estructura**.
+
+## Un ACP clásico sobre los mismos datos
+
+```{r}
+#| label: rupica-pca
+#| fig-cap: "Autovalores del ACP del conjunto rupica."
+rupica.X <- tab(rupica, freq = TRUE, NA.method = "mean")
+rupica.pca1 <- dudi.pca(rupica.X, scale = TRUE, scannf = FALSE, nf = 2)
+barplot(rupica.pca1$eig, main = "Conjunto rupica - autovalores del ACP",
+        col = heat.colors(length(rupica.pca1$eig)))
+```
+
+En general, los autovalores representan la cantidad de diversidad genética
+recogida por cada componente. Una **caída abrupta** marca la frontera entre
+patrones reales y estructuras no interpretables. Aquí la caída es suave, lo que
+ya es mala señal.
+
+```{r}
+#| label: rupica-pca-scatter
+#| fig-cap: "Primeros dos componentes del ACP, con densidad estimada por kernel."
+s.label(rupica.pca1$li)
+s.kde2d(rupica.pca1$li, add.p = TRUE, cpoint = 0)
+add.scatter.eig(rupica.pca1$eig, 2, 1, 2)
+```
+
+**Lo que se ve:** la única estructura que identifica el ACP son unos pocos
+**valores atípicos**. El `loadingplot` confirma que se deben a la posesión de
+unos pocos alelos raros:
+
+```{r}
+#| label: rupica-loadingplot
+#| fig-cap: "Cargas del primer eje del ACP: unos pocos alelos dominan."
+loadingplot(rupica.pca1$c1^2)
+```
+
+```{r}
+#| label: rupica-outliers
+X <- tab(rupica)
+bm203.221 <- X[, "Bm203.221"]
+table(bm203.221)
+rownames(X)[bm203.221 > 0.5]
+```
+
+Solo 4 genotipos poseen una copia del alelo 221 del marcador bm203 — y son
+exactamente los atípicos del gráfico. **Desde el punto de vista del ACP, esta
+sería la única estructura de los datos.** Pero hay más que ver.
+
+## Mapear y testear los componentes del ACP
+
+Antes de mapear, conviene entender la leyenda de `s.value`: cuadrados negros
+para valores positivos, blancos para negativos, tamaño proporcional al valor
+absoluto.
+
+```{r}
+#| label: leyenda-svalue
+#| fig-cap: "Leyenda del tipo de representación usado por s.value."
+s.value(cbind(1:11, rep(1, 11)), -5:5, cleg = 0)
+text(1:11, rep(1, 11), -5:5, col = "red", cex = 1.5)
+```
+
+```{r}
+#| label: mapa-pc1
+#| fig-cap: "Primer componente del ACP proyectado en el espacio geográfico."
+showBauges <- rupica$other$showBauges
+showBauges()
+s.value(rupica$other$xy, rupica.pca1$li[, 1], add.p = TRUE, cleg = 0.5)
+title("ACP - primer CP", col.main = "yellow", line = -2, cex.main = 2)
+```
+
+```{r}
+#| label: mapa-pc2
+#| fig-cap: "Segundo componente del ACP proyectado en el espacio geográfico."
+showBauges()
+s.value(rupica$other$xy, rupica.pca1$li[, 2], add.p = TRUE, csize = 0.7)
+title("ACP - segundo CP", col.main = "yellow", line = -2, cex.main = 2)
+```
+
+Ninguno de los dos componentes muestra un patrón espacial claro. Confirmemos
+esta impresión visual con un test formal del índice de Moran.
+
+### La red de conexión para el rebeco
+
+La elección aquí es **biológica**: la conectividad espacial se define como el
+solapamiento entre las áreas de campeo de los individuos, modeladas como discos
+de 1150 m de radio. Dos individuos son vecinos si sus discos se solapan, es
+decir, si están a menos de 2300 m.
+
+```{r}
+#| label: rupica-graph
+#| fig-cap: "Red de conexión de rupica."
+rupica.graph <- chooseCN(rupica$other$xy, type = 5, d1 = 0, d2 = 2300,
+                         plot = FALSE, res = "listw")
+rupica.graph
+
+plot(rupica.graph, rupica$other$xy)
+title("rupica.graph")
+```
+
+### Test de Moran sobre los componentes del ACP
+
+```{r}
+#| label: moran-pc1
+#| fig-cap: "Test de Moran por Monte Carlo sobre el primer CP del ACP."
+pc1.mctest <- moran.mc(rupica.pca1$li[, 1], rupica.graph, 999)
+plot(pc1.mctest)
+```
+
+Este resultado es **sorprendentemente significativo**. ¿Por qué? El gráfico de
+Moran (variable frente a su vector retardado) lo aclara:
+
+```{r}
+#| label: moran-plot
+#| fig-cap: "Gráfico de Moran del primer CP: la relación la generan unos pocos puntos."
+moran.plot(rupica.pca1$li[, 1], rupica.graph)
+```
+
+La autocorrelación positiva corresponde a una correlación positiva entre la
+variable y su vector retardado. Aquí esa relación está **enteramente producida
+por los atípicos identificados antes**, que resultan ser vecinos entre sí. Es
+por tanto un patrón trivial y sin interés biológico. Este es un ejemplo
+excelente de por qué un *p*-valor significativo no equivale a un resultado
+interpretable.
+
+```{r}
+#| label: moran-pc2
+#| fig-cap: "Test de Moran sobre el segundo CP: no significativo."
+pc2.mctest <- moran.mc(rupica.pca1$li[, 2], rupica.graph, 999)
+plot(pc2.mctest)
+```
+
+## Test multivariado: Mantel
+
+Los tests anteriores solo examinan dos componentes, es decir, un fragmento de
+los datos. El test de Mantel evalúa la estructura espacial en **el conjunto
+completo**, midiendo la correlación entre las distancias genéticas y las
+geográficas.
+
+```{r}
+#| label: mantel
+#| fig-cap: "Test de Mantel entre distancias genéticas y geográficas."
+mtest <- mantel.randtest(dist(rupica.X), dist(rupica$other$xy))
+mtest
+plot(mtest, nclass = 30)
+```
+
+El estadístico observado (≈ 0.0135) queda a la derecha del centro de la
+distribución nula, pero dentro de ella: el *p*-valor ronda 0.2–0.3 según la
+semilla. El tutorial original lo describe como "marginalmente significativo";
+siendo estrictos, **el test no rechaza la hipótesis nula, aunque sí insinúa
+señal espacial**. Y aquí está el punto pedagógico: ni el ACP ni un test global
+de aislamiento por distancia detectan de forma concluyente la estructura, pese a
+que —como veremos— existe y es fuerte. El test de Mantel busca una relación
+monótona distancia-genética-distancia-geográfica; una estructura de **parches
+separados por una barrera** no produce necesariamente esa señal. Justamente ese
+es el hueco que llena el sPCA.
+
+## Aplicación del sPCA
+
+Usamos la misma red de conexión que en los tests de Moran.
+
+```{r}
+#| label: rupica-spca
+#| fig-cap: "Autovalores del sPCA de rupica; en rojo los dos retenidos."
+rupica.spca1 <- spca(rupica, cn = rupica.graph, scannf = FALSE,
+                     nfposi = 2, nfnega = 0)
+barplot(rupica.spca1$eig, col = rep(c("red", "grey"), c(2, 1000)),
+        main = "Conjunto rupica - autovalores del sPCA")
+```
+
+```{r}
+#| label: rupica-spca-print
+rupica.spca1
+```
+
+Los dos primeros autovalores positivos destacan sobre el resto, y no hay
+autovalores negativos llamativos: **dos estructuras globales, ninguna local**.
+
+```{r}
+#| label: rupica-screeplot
+#| fig-cap: "Descomposición de los autovalores del sPCA de rupica en varianza y autocorrelación."
+screeplot(rupica.spca1)
+```
+
+**Lectura crítica:** $\lambda_1$ indica sin ninguna duda una estructura. En
+cambio $\lambda_2$ se distingue menos claramente de los autovalores siguientes,
+de modo que **hay que conservar esa incertidumbre al interpretar el segundo
+componente**.
+
+### Los mapas: aquí aparece lo que el ACP no vio
+
+Mapeamos con los **scores retardados** (`$ls`), que son una versión
+"desruidizada" de los componentes principales.
+
+```{r}
+#| label: mapa-spca-pc1
+#| fig-cap: "Primer componente del sPCA: dos zonas de alta montaña separadas por un valle."
+showBauges()
+s.value(rupica$other$xy, rupica.spca1$ls[, 1], add.p = TRUE, csize = 0.7)
+title("sPCA - primer CP", col.main = "yellow", line = -2, cex.main = 2)
+```
+
+Este primer componente muestra una estructura **notablemente clara**: opone dos
+zonas de alta altitud separadas por un valle. Se interpreta como un **obstáculo
+a la dispersión** del rebeco, dado que las zonas bajas implican mayor exposición
+a la depredación.
+
+```{r}
+#| label: mapa-spca-pc2
+#| fig-cap: "Segundo componente del sPCA: agrupaciones más pequeñas correspondientes a unidades sociales."
+showBauges()
+s.value(rupica$other$xy, rupica.spca1$ls[, 2], add.p = TRUE, csize = 0.7)
+title("sPCA - segundo CP", col.main = "yellow", line = -2, cex.main = 2)
+```
+
+Las agrupaciones más pequeñas de este segundo mapa corresponden a **unidades
+sociales identificadas por observación directa en el campo**. Esta estructura
+genética es entonces un reflejo del comportamiento social de los individuos —una
+validación externa notable del resultado.
+
+```{r}
+#| label: mapa-spca-colorplot
+#| fig-cap: "Ambas estructuras genéticas superpuestas mediante colorplot."
+showBauges()
+colorplot(rupica$other$xy, rupica.spca1$ls, axes = 1:2, transp = TRUE,
+          add = TRUE, cex = 3)
+title("sPCA - colorplot de los CP 1 y 2\n(scores retardados)",
+      col.main = "yellow", line = -2, cex = 2)
+```
+
+::: {.callout-tip}
+Los colores exactos pueden variar de un equipo a otro; lo que importa es el
+**patrón** de agrupamiento cromático, no los tonos concretos.
+:::
+
+# Síntesis: qué aprender de este ejemplo
+
+1. **El ACP clásico y el sPCA responden a preguntas distintas.** El ACP maximiza
+   varianza; el sPCA maximiza varianza *por* autocorrelación espacial. Cuando el
+   patrón geográfico tiene poca varianza —lo habitual en genética espacial— el
+   ACP no lo ve.
+
+2. **Los datos del rebeco lo ilustran de forma limpia:** el ACP solo encontró
+   cuatro individuos atípicos portadores de alelos raros; el sPCA encontró dos
+   estructuras espaciales biológicamente interpretables (una barrera topográfica
+   y unidades sociales), una de las cuales fue confirmada de forma independiente
+   por observación de campo.
+
+3. **La red de conexión es una decisión sustantiva, no técnica.** Define qué es
+   un vecino. En el caso del rebeco se derivó de la biología de la especie
+   (solapamiento de áreas de campeo de 1150 m de radio).
+
+4. **Nunca interpretar un autovalor del sPCA por su magnitud sola.** Hay que
+   descomponerlo con `screeplot()` en varianza e $I$ de Moran, y comprobar que
+   está bien separado de los demás y lejos del origen en ambas dimensiones.
+
+5. **Significativo no es igual a interpretable.** El test de Moran sobre el
+   primer CP del ACP salió significativo, pero `moran.plot` reveló que la señal
+   la producían unos pocos atípicos vecinos entre sí.
+
+6. **Para mapear, usar los scores retardados (`$ls`)**, no los crudos (`$li`):
+   el promedio espacial filtra el ruido individual y hace visibles las
+   estructuras globales.
+
+7. **Interpolar siempre después del análisis**, nunca antes, para no fabricar
+   estructura espacial artificial.
+
+# Referencias
+
+1. Jombart T, Devillard S, Dufour A-B, Pontier D (2008). Revealing cryptic
+   spatial patterns in genetic variability by a new multivariate method.
+   *Heredity* **101**: 92-103.
+2. Jombart T (2008). adegenet: a R package for the multivariate analysis of
+   genetic markers. *Bioinformatics* **24**: 1403-1405.
+3. Legendre P, Legendre L (1998). *Numerical Ecology*. Elsevier, Amsterdam.
+4. Moran P (1948). The interpretation of statistical maps. *JRSS B* **10**:
+   243-251.
+5. Cliff A, Ord J (1981). *Spatial Processes. Model & Applications*. Pion,
+   London.
+6. Menozzi P, Piazza A, Cavalli-Sforza LL (1978). Synthetic maps of human gene
+   frequencies in Europeans. *Science* **201**: 786-792.
+
+```{r}
+#| label: sesion
+sessionInfo()
+```
+
+# Parte 3 — Caso propio: hidrogeoquímica de aguas subterráneas
+
+## La correspondencia con los ejemplos genéticos
+
+En `spcaIllus` y `rupica`, `spca()` recibe un objeto `genind` y de ahí saca sola
+las dos piezas del método. Con datos hidrogeoquímicos no hay `genind`, así que
+hay que entregarle esas piezas por separado. La equivalencia es directa:
+
+| En el ejemplo genético | Aquí | Qué es |
+|---|---|---|
+| `obj@tab` — frecuencias alélicas | **`X`**: matriz `n × p` de variables fisicoquímicas | la matriz de datos |
+| `other(obj)$xy` | **`xy`**: matriz `n × 2` de coordenadas proyectadas | ubicación de cada punto |
+| `rupica.graph` (`chooseCN`) | **`cn`**: `listw` construido con `chooseCN` | la red de conexión → matriz **L** |
+| entidad = genotipo | entidad = **punto de muestreo** (`cod_sgc`) | las filas |
+| variable = alelo | variable = **ion, metal, pH, T** | las columnas |
+
+`spca` es genérica y tiene métodos `spca.matrix` y `spca.data.frame` además de
+`spca.genind`, así que una matriz numérica corriente sirve como entrada:
+
+```{r}
+#| label: hq-metodos
+#| eval: false
+methods("spca")
+args(adegenet:::spca.matrix)
+```
+
+::: {.callout-important}
+## Las tres reglas que no se pueden romper
+
+1. **`X` debe ser numérica y sin `NA`.** Fuera `cod_sgc`, `Tipo de punto` y
+   `num_muestra`: son identificadores, no variables.
+2. **`X` y `xy` deben tener las mismas filas, en el mismo orden.** Por eso el
+   filtro de puntos sin geometría se hace **antes** de separar las dos piezas, y
+   sobre un único `data.frame`.
+3. **Las coordenadas deben estar proyectadas (en metros o km), no en grados.**
+   La red de conexión se define por distancias euclidianas; con grados
+   decimales, un grado de longitud y uno de latitud no miden lo mismo y la red
+   sale deformada.
+:::
+
+## Paso 1 — Traer los datos y las coordenadas
+
+La columna `geom` llega de PostGIS como EWKB en hexadecimal (clase
+`pq_geometry`), no como geometría de *sf*. Hay que convertirla con `st_as_sfc`
+indicando `EWKB = TRUE`; el SRID (4686, MAGNA-SIRGAS) viaja dentro del propio
+EWKB y *sf* lo lee solo.
+
+```{r}
+#| label: hq-setup
+library(adegenet)
+library(spdep)
+library(ade4)
+library(adespatial)
+library(RPostgres)
+library(sf)
+library(dplyr)
+
+rm(list = ls())
+set.seed(1)
+
+df <- readRDS("/mnt/disco-c/PCAs/data/acp_mediana.rds")
+
+con <- dbConnect(
+  Postgres(),
+  host     = "172.25.2.250",
+  port     = 5440,
+  dbname   = "aguas_subterraneas",
+  user     = "admin_consulta",
+  password = "11235813"
+)
+xy_raw <- dbGetQuery(con, "select
+  pm.cod_sgc,
+  pm.geom
+from vistas_aguas.geom_muestreo_36 pm;")
+dbDisconnect(con)
+
+str(df)
+```
+
+```{r}
+#| label: hq-geom
+# EWKB hexadecimal -> sfc; el SRID (4686) viene dentro del EWKB
+geom <- st_as_sfc(structure(as.character(xy_raw$geom), class = "WKB"),
+                  EWKB = TRUE)
+pts  <- st_sf(cod_sgc = xy_raw$cod_sgc, geometry = geom)
+st_crs(pts)$input
+
+# Reproyectar a MAGNA-SIRGAS / Origen-Nacional (EPSG:9377, metros) y pasar a km
+pts    <- st_transform(pts, 9377)
+coords <- st_coordinates(pts)
+xy_tbl <- tibble(cod_sgc = pts$cod_sgc,
+                 X = coords[, 1] / 1000,
+                 Y = coords[, 2] / 1000)
+head(xy_tbl)
+```
+
+::: {.callout-tip}
+Dividir por 1000 no cambia nada del análisis (la red es invariante a la escala),
+pero hace legibles los umbrales de distancia: `d2 = 8` se lee "8 km".
+:::
+
+## Paso 2 — Unir y filtrar: un solo `data.frame` maestro
+
+`inner_join` en lugar de `left_join` + filtro de `NA` hace lo mismo en un paso y
+deja explícito que solo sobreviven los puntos con geometría.
+
+```{r}
+#| label: hq-join
+dat <- inner_join(df, xy_tbl, by = "cod_sgc")
+
+cat("puntos con química:", nrow(df),
+    "| con geometría:", nrow(dat),
+    "| descartados:", nrow(df) - nrow(dat), "\n")
+
+# Comprobaciones antes de seguir
+stopifnot(!any(duplicated(dat$cod_sgc)))   # una fila por punto
+sum(duplicated(dat[, c("X", "Y")]))        # coordenadas repetidas: rompen chooseCN
+```
+
+::: {.callout-warning}
+Dos puntos con **coordenadas idénticas** hacen fallar la triangulación de
+Delaunay y los grafos de Gabriel. Si aparecen, hay que agregarlos (mediana de
+sus análisis) o desplazarlos unos metros con `jitter()`.
+:::
+
+## Paso 3 — La matriz **X**
+
+Aquí está la decisión analítica de fondo. Las concentraciones iónicas son
+**fuertemente asimétricas**: en estos datos el Mn va de 0.3 a 1930 µg/L, casi
+cuatro órdenes de magnitud. Sin transformar, un puñado de muestras muy
+mineralizadas dominaría el análisis y reproduciríamos el problema de los
+atípicos del ejemplo `rupica`.
+
+Por eso:
+
+- **log₁₀ para las concentraciones** (Ca, Mg, Na, K, HCO₃, SO₄, Cl, Si, Mn, As).
+  El `+ 1e-3` evita `log10(0)` en los valores por debajo del límite de
+  detección.
+- **pH y T se dejan como están**: el pH ya es una escala logarítmica y la
+  temperatura no es una concentración.
+- **`scale = TRUE` en `spca`**, imprescindible porque las variables están en
+  unidades distintas (mg/L, µg/L, °C, adimensional). Es el equivalente de
+  `dudi.pca(scale = TRUE)` del ejemplo `rupica`.
+
+```{r}
+#| label: hq-X
+vars_conc  <- c("Ca", "Mg", "Na", "K", "HCO3", "SO4", "Cl", "Si", "Mn", "As")
+vars_otras <- c("pH", "T")
+
+X <- dat |>
+  mutate(across(all_of(vars_conc), ~ log10(.x + 1e-3))) |>
+  select(all_of(c(vars_otras, vars_conc))) |>
+  as.matrix()
+
+rownames(X) <- dat$cod_sgc   # equivalente a los nombres de genotipo
+
+dim(X)
+stopifnot(is.numeric(X), !anyNA(X))
+round(head(X, 3), 3)
+```
+
+## Paso 4 — La matriz `xy`
+
+```{r}
+#| label: hq-xy
+xy <- as.matrix(dat[, c("X", "Y")])
+rownames(xy) <- dat$cod_sgc
+
+stopifnot(nrow(xy) == nrow(X), identical(rownames(xy), rownames(X)))
+head(xy, 3)
+cat("extensión del área:", round(diff(range(xy[, 1])), 1), "x",
+    round(diff(range(xy[, 2])), 1), "km\n")
+```
+
+## Paso 5 — La red de conexión
+
+Igual que con el rebeco, esta es una **decisión sustantiva**. En hidrogeoquímica
+el criterio razonable es la conectividad del flujo subterráneo: dos puntos son
+vecinos si es plausible que pertenezcan al mismo sistema de flujo. A falta de un
+modelo hidrogeológico explícito, el grafo de **Gabriel** (`type = 2`) es un buen
+punto de partida: conecta vecinos geométricamente próximos sin fijar un umbral
+de distancia arbitrario y sin los arcos largos de borde que produce Delaunay.
+
+```{r}
+#| label: hq-red
+#| fig-cap: "Red de conexión de Gabriel sobre los puntos de muestreo."
+cn <- chooseCN(xy, type = 2, ask = FALSE, plot.nb = FALSE,
+               result.type = "listw")
+cn
+
+plot(cn, xy)
+points(xy, pch = 20, col = "red")
+title("Red de Gabriel - puntos de muestreo")
+```
+
+Alternativas que conviene contrastar (la estructura que encuentre el sPCA no
+debería depender críticamente de esta elección):
+
+```{r}
+#| label: hq-redes-alt
+#| eval: false
+cn_del <- chooseCN(xy, type = 1, ask = FALSE, plot.nb = FALSE, result.type = "listw")
+cn_knn <- chooseCN(xy, type = 6, k = 5, ask = FALSE, plot.nb = FALSE, result.type = "listw")
+cn_dis <- chooseCN(xy, type = 5, d1 = 0, d2 = 8, ask = FALSE, plot.nb = FALSE, result.type = "listw")
+```
+
+## Paso 6 — El sPCA
+
+Con las tres piezas listas, la llamada es idéntica en forma a
+`spca(rupica, cn = rupica.graph, ...)`:
+
+```{r}
+#| label: hq-spca
+#| fig-cap: "Autovalores del sPCA hidrogeoquímico."
+hq.spca <- spca(X, xy = xy, cn = cn,
+                center = TRUE, scale = TRUE,
+                scannf = FALSE, nfposi = 2, nfnega = 1)
+hq.spca
+
+barplot(hq.spca$eig, col = spectral(length(hq.spca$eig)),
+        main = "sPCA hidrogeoquímica - autovalores")
+legend("topright", fill = spectral(2),
+       leg = c("Estructuras globales", "Estructuras locales"))
+abline(h = 0, col = "grey")
+```
+
+Dos autovalores positivos (≈ 2.85 y 1.07) se separan netamente del resto; los
+negativos son pequeños y sin ruptura: **dos estructuras globales, ninguna
+local**. El `screeplot` confirma que ambos combinan varianza alta con
+autocorrelación alta:
+
+```{r}
+#| label: hq-screeplot
+#| fig-cap: "Descomposición de los autovalores en varianza e I de Moran."
+screeplot(hq.spca)
+```
+
+## Paso 7 — Validación y lectura
+
+```{r}
+#| label: hq-tests
+myGtest <- global.rtest(X, hq.spca$lw, nperm = 999)
+myGtest
+
+myLtest <- local.rtest(X, hq.spca$lw, nperm = 999)
+myLtest
+```
+
+El test global es significativo y el local no: coherente con lo que muestran los
+autovalores.
+
+```{r}
+#| label: hq-mapas
+#| fig-width: 11
+#| fig-height: 5.5
+#| fig-cap: "Scores retardados (ls) de los dos primeros componentes en el espacio geográfico."
+par(mfrow = c(1, 2))
+s.value(xy, hq.spca$ls[, 1], csize = 0.8, include.origin = FALSE)
+title("sPCA - primer CP (ls)")
+s.value(xy, hq.spca$ls[, 2], csize = 0.8, include.origin = FALSE)
+title("sPCA - segundo CP (ls)")
+par(mfrow = c(1, 1))
+```
+
+::: {.callout-warning}
+`include.origin = FALSE` es obligatorio aquí. Por defecto `s.value` incluye el
+origen `(0,0)` en el rango del gráfico; con coordenadas proyectadas (X ≈ 4800
+km, Y ≈ 2100 km) todos los puntos se colapsarían en una esquina.
+:::
+
+```{r}
+#| label: hq-colorplot
+#| fig-cap: "Ambas estructuras superpuestas mediante colorplot."
+colorplot(xy, hq.spca$ls, axes = 1:2, transp = TRUE, cex = 2.5,
+          xlab = "Este (km)", ylab = "Norte (km)")
+title("sPCA - colorplot de los CP 1 y 2 (scores retardados)")
+```
+
+```{r}
+#| label: hq-cargas
+#| fig-cap: "Contribución de cada variable al primer eje del sPCA."
+myLoadings <- hq.spca$c1[, 1]^2
+names(myLoadings) <- rownames(hq.spca$c1)
+loadingplot(myLoadings, xlab = "Variable", ylab = "Peso",
+            main = "Contribución de las variables al primer eje del sPCA")
+
+round(hq.spca$c1, 3)
+```
+
+El primer eje carga sobre Mg, Ca, K, Cl, Na y SO₄ con el mismo signo: es un
+gradiente de **mineralización total**, organizado espacialmente. El segundo
+opone la temperatura y el Si a Ca y SO₄.
+
+## Paso 8 — Devolver los scores a la tabla (y al SIG)
+
+```{r}
+#| label: hq-salida
+resultado <- dat |>
+  select(cod_sgc, `Tipo de punto`, X, Y) |>
+  mutate(sPC1 = hq.spca$li[, 1],
+         sPC2 = hq.spca$li[, 2],
+         sPC1_lag = hq.spca$ls[, 1],
+         sPC2_lag = hq.spca$ls[, 2])
+
+head(resultado)
+```
+
+```{r}
+#| label: hq-exportar
+#| eval: false
+# Exportar como capa geográfica
+st_as_sf(resultado, coords = c("X", "Y"), crs = 9377) |>
+  st_write("/mnt/disco-c/PCAs/data/spca_scores.gpkg", delete_dsn = TRUE)
+```
+
+## Resumen del patrón a seguir
+
+```{r}
+#| label: hq-resumen
+#| eval: false
+# 0. qué columnas entran al análisis (¡no cod_sgc, no Tipo de punto!)
+vars_conc  <- c("Ca", "Mg", "Na", "K", "HCO3", "SO4", "Cl", "Si", "Mn", "As")
+vars_otras <- c("pH", "T")
+
+# 1. UNA tabla con química + coordenadas, ya filtrada
+dat <- inner_join(df, xy_tbl, by = "cod_sgc")
+
+# 2. X: matriz numérica, transformada, con rownames
+X <- dat |>
+  mutate(across(all_of(vars_conc), ~ log10(.x + 1e-3))) |>
+  select(all_of(c(vars_otras, vars_conc))) |>
+  as.matrix()
+rownames(X) <- dat$cod_sgc
+
+# 3. xy: coordenadas PROYECTADAS, mismas filas y mismo orden
+xy <- as.matrix(dat[, c("X", "Y")]); rownames(xy) <- dat$cod_sgc
+
+# 4. cn: la red de conexión
+cn <- chooseCN(xy, type = 2, ask = FALSE, plot.nb = FALSE, result.type = "listw")
+
+# 5. el análisis
+hq.spca <- spca(X, xy = xy, cn = cn, scale = TRUE, scannf = FALSE,
+                nfposi = 2, nfnega = 1)
+```
+

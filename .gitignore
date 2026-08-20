@@ -1,0 +1,22 @@
+# Variables de entorno
+.env
+# Temporales
+.Rhistory
+.quarto/*
+cbrb_aplicacion_spca_cache*
+cbrb_aplicacion_spca_cache*
+cbrb_aplicacion_spca_files/*
+# Ignorar pdf de contexto
+pdf/*
+01_vecindades_ref.R
+ejemplo.R
+exportar_red_geojson.R
+redes_vecindad.png
+snowflake.log
+# Carpetas
+sql/*
+data/*
+# PDF
+cbrb_aplicacion_spca.pdf
+# Mantener
+!data/acp_mediana.rds
